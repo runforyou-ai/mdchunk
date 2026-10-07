@@ -373,7 +373,8 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   than any backtick run it contains.
 - `convert/html`: `html.New(opts)`. CommonMark with GFM tables; spanned cells
   repeated; a table without header cells promotes its first row; relative links
-  resolved against `Input.BaseURL`.
+  resolved against `Input.BaseURL`. The underlying library builds the whole
+  output, so the output limit is checked once conversion finishes.
 - `convert/csv`: `csv.New(opts)` with `Comma`, `NoHeader` and `LazyQuotes`.
   One table; the first row is the header. With `NoHeader` every row is a body
   row under an empty header row of the same width, so the output stays a GFM
