@@ -428,8 +428,8 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
 - `convert/all`: `all.New(opts) *all.Registry`. Embeds `*convert.Registry`
   with every format above registered, and `Close` releases the converters it
   created (the PDF pool), not ones registered later. `all.Options` also has
-  `Limits` and `Fallback`, applied to each converter whose own `Options` leave
-  them zero.
+  shared `Limits`, applied field by field to each converter whose own field is
+  zero, and a shared `Fallback` for converters whose own is nil.
 
 ### Lifecycle of `pdf.Converter`
 

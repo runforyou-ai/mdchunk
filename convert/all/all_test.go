@@ -14,6 +14,7 @@ import (
 	"github.com/runforyou-ai/mdchunk/convert"
 	"github.com/runforyou-ai/mdchunk/convert/all"
 	"github.com/runforyou-ai/mdchunk/convert/docx"
+	"github.com/runforyou-ai/mdchunk/convert/pptx"
 	"github.com/runforyou-ai/mdchunk/internal/pdftest"
 	"github.com/runforyou-ai/mdchunk/split"
 )
@@ -37,8 +38,9 @@ func TestDefaults(t *testing.T) {
 	}
 	r := all.New(all.Options{
 		Fallback: simplifiedchinese.GB18030,
-		Limits:   convert.Limits{MaxOutputBytes: 1 << 10},
+		Limits:   convert.Limits{MaxBytes: 2 << 10, MaxOutputBytes: 1 << 10},
 		DOCX:     docx.Options{Limits: convert.Limits{MaxBytes: 4}},
+		PPTX:     pptx.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}},
 	})
 	defer func() { _ = r.Close() }()
 	doc, err := r.Convert(context.Background(), convert.CSV, convert.Input{Reader: strings.NewReader(gbk)})
@@ -49,6 +51,9 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("shared limit not applied: %v", err)
 	}
 	var limit *convert.LimitError
+	if _, err := r.Convert(context.Background(), convert.PPTX, convert.Input{Reader: strings.NewReader(strings.Repeat("x", 3<<10))}); !errors.As(err, &limit) || limit.Limit != convert.LimitSource {
+		t.Errorf("shared MaxBytes with an own expansion limit: %v", err)
+	}
 	if _, err := r.Convert(context.Background(), convert.DOCX, convert.Input{Reader: strings.NewReader("PK\x03\x04x")}); !errors.As(err, &limit) || limit.Limit != convert.LimitSource {
 		t.Errorf("own limit not kept: %v", err)
 	}
@@ -102,6 +107,9 @@ func TestPDFChunksMapToPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunks := splitter.Split(doc.Markdown)
+	if len(chunks) == 0 {
+		t.Fatal("no chunks")
+	}
 	spanning := false
 	for _, c := range chunks {
 		numbers := pages(doc, c)

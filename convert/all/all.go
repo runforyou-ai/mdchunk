@@ -6,6 +6,8 @@
 package all
 
 import (
+	"cmp"
+
 	"golang.org/x/text/encoding"
 
 	"github.com/runforyou-ai/mdchunk/convert"
@@ -18,8 +20,9 @@ import (
 	"github.com/runforyou-ai/mdchunk/convert/xlsx"
 )
 
-// Options configures every built-in converter. Limits and Fallback apply to
-// a converter whose own Options leave them zero.
+// Options configures every built-in converter. Each field of Limits applies to
+// a converter whose own Limits leave that field zero; Fallback applies to a
+// converter whose own Fallback is nil.
 type Options struct {
 	Limits   convert.Limits
 	Fallback encoding.Encoding
@@ -44,10 +47,11 @@ type Registry struct {
 // New returns a Registry with txt, md, json, html, csv, docx, pptx, xlsx and pdf registered.
 func New(opts Options) *Registry {
 	limits := func(own convert.Limits) convert.Limits {
-		if own == (convert.Limits{}) {
-			return opts.Limits
+		return convert.Limits{
+			MaxBytes:         cmp.Or(own.MaxBytes, opts.Limits.MaxBytes),
+			MaxExpandedBytes: cmp.Or(own.MaxExpandedBytes, opts.Limits.MaxExpandedBytes),
+			MaxOutputBytes:   cmp.Or(own.MaxOutputBytes, opts.Limits.MaxOutputBytes),
 		}
-		return own
 	}
 	fallback := func(own encoding.Encoding) encoding.Encoding {
 		if own == nil {

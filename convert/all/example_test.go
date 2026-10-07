@@ -12,7 +12,7 @@ import (
 
 func Example() {
 	converters := all.New(all.Options{})
-	defer converters.Close()
+	defer func() { _ = converters.Close() }()
 
 	format, _ := convert.FormatOf("guide.html")
 	doc, err := converters.Convert(context.Background(), format, convert.Input{

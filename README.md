@@ -19,7 +19,6 @@ stores, no framework, just Go.
   always, so you can highlight sources and cite exact passages.
 - **Bounded.** `Size` is the target, `MaxSize` a hard limit, `Overlap` an upper
   bound. Lengths count code points.
-
 - **Converters included.** PDF (PDFium compiled to WebAssembly, no cgo),
   Word, PowerPoint, Excel, CSV, HTML, plain text, Markdown and JSON. Pages,
   slides and sheets are recorded as byte ranges of the Markdown, so every

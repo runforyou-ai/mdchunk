@@ -13,6 +13,8 @@ go run . -size 200 -overlap 30
 
 - **over limit**: chunks longer than `size + size/5` code points.
 - **source preserved**: every chunk is a substring of the input.
+- The program also prints timings, which depend on the machine and are left
+  out below.
 
 Results with the defaults:
 

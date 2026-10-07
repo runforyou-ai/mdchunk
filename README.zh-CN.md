@@ -11,7 +11,6 @@ mdchunk 把文档转换为可以追溯到原文的 Markdown 分段，是检索�
 - **补充上下文，不改写正文。** 每个分段带上它所在的标题路径和表头，可用作向量化输入；分段正文保持原样。
 - **处处是字节区间。** `chunk.Text == input[chunk.Start:chunk.End]` 始终成立，可以直接高亮原文、引用准确段落。
 - **长度有界。** `Size` 是目标长度，`MaxSize` 是硬上限，`Overlap` 是重叠上限，长度按 Unicode 码点计算。
-
 - **内置转换器。** PDF（PDFium 编译为 WebAssembly，无需 cgo）、Word、PowerPoint、Excel、CSV、HTML、纯文本、Markdown 和 JSON。页、幻灯片和工作表以 Markdown 字节区间记录，每个分段都能注明出自哪一页。
 
 契约见 [docs/design.md](docs/design.md)，与 langchaingo、eino-ext 的对比见 [bench/](bench/README.md)。

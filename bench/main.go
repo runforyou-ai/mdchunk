@@ -9,8 +9,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -31,9 +33,9 @@ type splitter struct {
 
 // stats summarises one splitter's output on one document.
 type stats struct {
-	chunks, maxLen, overLimit, midSentence int
-	preserved                              bool
-	elapsed                                time.Duration
+	chunks, maxLen, overLimit int
+	preserved                 bool
+	elapsed                   time.Duration
 }
 
 func main() {
@@ -101,14 +103,14 @@ func main() {
 
 	limit := *size + *size/5
 	fmt.Printf("Size %d, overlap %d; over limit means longer than %d code points.\n\n", *size, *overlap, limit)
-	fmt.Println("| document | splitter | chunks | longest | over limit | ends mid-sentence | source preserved | time |")
-	fmt.Println("|---|---|---|---|---|---|---|---|")
-	for _, name := range sortedKeys(documents) {
+	fmt.Println("| document | splitter | chunks | longest | over limit | source preserved | time |")
+	fmt.Println("|---|---|---|---|---|---|---|")
+	for _, name := range slices.Sorted(maps.Keys(documents)) {
 		text := documents[name]
 		for _, s := range splitters {
 			st := measure(s, text, limit)
-			fmt.Printf("| %s | %s | %d | %d | %d | %d | %v | %s |\n", name, s.name, st.chunks, st.maxLen, st.overLimit,
-				st.midSentence, st.preserved, st.elapsed.Round(time.Microsecond))
+			fmt.Printf("| %s | %s | %d | %d | %d | %v | %s |\n", name, s.name, st.chunks, st.maxLen, st.overLimit,
+				st.preserved, st.elapsed.Round(time.Microsecond))
 		}
 	}
 }
@@ -122,7 +124,7 @@ func measure(s splitter, text string, limit int) stats {
 		panic(err)
 	}
 	st := stats{chunks: len(chunks), preserved: true, elapsed: elapsed}
-	for i, c := range chunks {
+	for _, c := range chunks {
 		n := utf8.RuneCountInString(c)
 		st.maxLen = max(st.maxLen, n)
 		if n > limit {
@@ -131,28 +133,6 @@ func measure(s splitter, text string, limit int) stats {
 		if !strings.Contains(text, c) {
 			st.preserved = false
 		}
-		// A chunk other than the last that ends inside CJK prose ends mid-sentence.
-		trimmed := strings.TrimRight(c, " \n")
-		last, _ := utf8.DecodeLastRuneInString(trimmed)
-		if i < len(chunks)-1 && last >= 0x4e00 && last <= 0x9fff {
-			st.midSentence++
-		}
 	}
 	return st
-}
-
-// sortedKeys returns the map's keys in order.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	for i := range keys {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[j] < keys[i] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-	return keys
 }
