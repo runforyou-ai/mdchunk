@@ -47,8 +47,9 @@ func (w *Writer) String() string {
 	return w.b.String()
 }
 
-// Fence wraps content in a code fence longer than any backtick run it contains.
-func Fence(info, content string) string {
+// Fence writes content in a code fence longer than any backtick run it contains.
+// The limit is checked before anything is written.
+func (w *Writer) Fence(info, content string) {
 	longest, run := 0, 0
 	for i := 0; i < len(content); i++ {
 		if content[i] == '`' {
@@ -59,8 +60,15 @@ func Fence(info, content string) string {
 		}
 	}
 	fence := strings.Repeat("`", max(3, longest+1))
+	newline := ""
 	if !strings.HasSuffix(content, "\n") {
-		content += "\n"
+		newline = "\n"
 	}
-	return fence + info + "\n" + content + fence
+	if w.err == nil && w.max >= 0 && int64(w.b.Len()+2*len(fence)+len(info)+1+len(content)+len(newline)) > w.max {
+		w.err = &convert.LimitError{Limit: convert.LimitOutput, Max: w.max}
+		return
+	}
+	w.WriteString(fence + info + "\n")
+	w.WriteString(content)
+	w.WriteString(newline + fence)
 }

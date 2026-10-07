@@ -51,11 +51,12 @@ func (c converter) Convert(ctx context.Context, in convert.Input) (convert.Docum
 	if text == "" {
 		return convert.Document{}, nil
 	}
-	if c.fence != "" {
-		text = mdwrite.Fence(c.fence, text)
-	}
 	w := mdwrite.New(limits.MaxOutputBytes)
-	w.WriteString(text)
+	if c.fence != "" {
+		w.Fence(c.fence, text)
+	} else {
+		w.WriteString(text)
+	}
 	if err := w.Err(); err != nil {
 		return convert.Document{}, err
 	}

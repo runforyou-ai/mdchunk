@@ -40,7 +40,8 @@ const (
 	PDF      Format = "pdf"
 )
 
-// formatAliases maps alternative extensions to their canonical format.
+// formatAliases maps alternative extensions to their canonical format. "yaml"
+// has no built-in converter; the alias serves custom ones.
 var formatAliases = map[string]Format{
 	"markdown": Markdown,
 	"htm":      HTML,
@@ -141,8 +142,11 @@ type Registry struct {
 	converters map[Format]Converter
 }
 
-// Register makes c the converter for formats.
+// Register makes c the converter for formats. It panics if c is nil.
 func (r *Registry) Register(c Converter, formats ...Format) {
+	if c == nil {
+		panic("mdchunk/convert: Register with a nil Converter")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.converters == nil {

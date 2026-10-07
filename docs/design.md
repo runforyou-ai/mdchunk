@@ -224,7 +224,7 @@ tables). Inputs longer than `math.MaxInt32` bytes panic.
 
 ```go
 // Format is a normalised file extension: lower case, no dot, aliases resolved
-// (markdown→md, htm→html, yml→yaml).
+// (markdown→md, text→txt, htm→html, yml→yaml).
 type Format string
 
 // Formats of the built-in converters.
@@ -358,10 +358,12 @@ holding that package's `Options`.
 
 ### Text decoding
 
-Shared by text, HTML and CSV: a BOM wins, then `Input.Charset`, then (HTML
-only) the first `<meta>` declaration before `<body>`, then UTF-8. Invalid
-UTF-8 is decoded with `Options.Fallback` when set (for example GB18030),
-otherwise invalid bytes become U+FFFD.
+Shared by text, HTML and CSV: a BOM (UTF-8, UTF-16 or UTF-32) wins, then
+`Input.Charset`, then (HTML only) the first `<meta>` declaration before
+`<body>`, then UTF-8. A declared charset is used only when it names a known
+encoding other than the replacement encoding. Undeclared input that is not
+valid UTF-8 is decoded with `Options.Fallback` when set (for example
+GB18030). Bytes that cannot be decoded become U+FFFD.
 
 ### Built-in converters
 

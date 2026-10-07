@@ -14,7 +14,8 @@ import (
 const chunkSize = 64 << 10
 
 // Read reads all of in.Reader, checking ctx between reads. maxBytes < 0 means
-// unlimited; beyond maxBytes it returns a *convert.LimitError for the source.
+// unlimited; otherwise at most maxBytes+1 bytes are read, and a source longer
+// than maxBytes returns a *convert.LimitError.
 func Read(ctx context.Context, in convert.Input, maxBytes int64) ([]byte, error) {
 	if in.Reader == nil {
 		return nil, errors.New("mdchunk/convert: Input.Reader is nil")
@@ -25,8 +26,14 @@ func Read(ctx context.Context, in convert.Input, maxBytes int64) ([]byte, error)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		n, err := in.Reader.Read(buf)
-		data = append(data, buf[:n]...)
+		next := buf
+		if maxBytes >= 0 {
+			if remaining := maxBytes + 1 - int64(len(data)); remaining < int64(len(next)) {
+				next = next[:remaining]
+			}
+		}
+		n, err := in.Reader.Read(next)
+		data = append(data, next[:n]...)
 		if maxBytes >= 0 && int64(len(data)) > maxBytes {
 			return nil, &convert.LimitError{Limit: convert.LimitSource, Max: maxBytes}
 		}
