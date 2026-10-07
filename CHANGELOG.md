@@ -17,3 +17,5 @@
 - Packages `convert/csv` and `convert/xlsx`: CSV with delimiter, header and
   quoting options; Excel with one section per sheet, displayed or raw values
   and hidden sheets on request.
+- Package `convert/pdf`: PDF through PDFium WebAssembly with one section per
+  page, font-size headings, bounded workers and an idempotent `Close`.
