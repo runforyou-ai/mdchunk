@@ -7,7 +7,9 @@
 // where line spacing grows or the font size changes. Reading order follows
 // PDFium's text order; multi-column layout and table recovery are not
 // attempted. A PDF without a text layer yields empty Markdown and one empty
-// section per page.
+// section per page. Documents that need a password to open return
+// convert.ErrEncrypted; documents restricted only by an owner password convert
+// normally.
 package pdf
 
 import (
@@ -25,6 +27,7 @@ import (
 	"github.com/klippa-app/go-pdfium"
 	pdfiumerrors "github.com/klippa-app/go-pdfium/errors"
 	"github.com/klippa-app/go-pdfium/requests"
+	"github.com/klippa-app/go-pdfium/responses"
 	"github.com/klippa-app/go-pdfium/webassembly"
 
 	"github.com/runforyou-ai/mdchunk/convert"
@@ -61,6 +64,8 @@ type Converter struct {
 
 	mu       sync.Mutex
 	closed   bool
+	released chan struct{} // closed once Close has released the instances
+	closeErr error
 	pool     pdfium.Pool
 	inFlight sync.WaitGroup
 }
@@ -70,30 +75,31 @@ func New(opts Options) *Converter {
 	if opts.Workers <= 0 {
 		opts.Workers = 2
 	}
-	return &Converter{opts: opts, slots: make(chan struct{}, opts.Workers), done: make(chan struct{})}
+	return &Converter{opts: opts, slots: make(chan struct{}, opts.Workers), done: make(chan struct{}), released: make(chan struct{})}
 }
 
 // Close releases the PDFium instances after conversions in flight finish.
 // Calls waiting for a worker, and later calls, return convert.ErrClosed.
-// Close is idempotent.
+// Every call to Close returns once the instances are released.
 func (c *Converter) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return nil
+		<-c.released
+		return c.closeErr
 	}
 	c.closed = true
 	close(c.done)
 	c.mu.Unlock()
 	c.inFlight.Wait()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pool == nil {
-		return nil
+	if c.pool != nil {
+		c.closeErr = c.pool.Close()
+		c.pool = nil
 	}
-	err := c.pool.Close()
-	c.pool = nil
-	return err
+	c.mu.Unlock()
+	close(c.released)
+	return c.closeErr
 }
 
 // acquire takes a worker slot and returns the PDFium pool, starting it if needed.
@@ -157,6 +163,12 @@ type line struct {
 	text                     string
 	size                     float64
 	left, right, top, bottom float64
+	space                    bool // a space follows the last character
+}
+
+// height returns the line's height in points.
+func (l line) height() float64 {
+	return l.top - l.bottom
 }
 
 // extract reads the text lines of every page and the page count.
@@ -187,48 +199,73 @@ func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, e
 		}
 		page, err := instance.GetPageTextStructured(&requests.GetPageTextStructured{
 			Page:                   requests.Page{ByIndex: &requests.PageByIndex{Document: document.Document, Index: index}},
-			Mode:                   requests.GetPageTextStructuredModeRects,
+			Mode:                   requests.GetPageTextStructuredModeChars,
 			CollectFontInformation: true,
 		})
 		if err != nil {
 			return nil, 0, fmt.Errorf("%w: page %d: %w", convert.ErrCorrupt, index+1, err)
 		}
-		// Text blocks on one line merge; the line takes the font size of its longest block.
-		dominant := 0
-		for _, rect := range page.Rects {
-			text := strings.TrimRight(rect.Text, "\r\n")
-			if strings.TrimSpace(text) == "" {
-				continue
-			}
-			size := 0.0
-			if rect.FontInformation != nil {
-				size = rect.FontInformation.RenderedSize
-			}
-			position := rect.PointPosition
-			current := len(lines) - 1
-			if current < 0 || lines[current].page != index || position.Top < lines[current].bottom ||
-				position.Bottom > lines[current].top || position.Left < lines[current].left {
-				lines = append(lines, line{page: index, text: text, size: size,
-					left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
-				dominant = utf8.RuneCountInString(text)
-				continue
-			}
-			l := &lines[current]
-			last, _ := utf8.DecodeLastRuneInString(l.text)
-			first, _ := utf8.DecodeRuneInString(text)
-			// Separated blocks get a space unless either side is CJK or already a space.
-			if position.Left-l.right > max(size, l.size)*0.2 && !unicode.IsSpace(last) && !unicode.IsSpace(first) &&
-				last < wideRune && first < wideRune {
-				l.text += " "
-			}
-			l.text += text
-			if runes := utf8.RuneCountInString(text); runes > dominant {
-				l.size, dominant = size, runes
-			}
-			l.right, l.top, l.bottom = max(l.right, position.Right), max(l.top, position.Top), min(l.bottom, position.Bottom)
-		}
+		lines = appendChars(lines, index, page.Chars)
 	}
 	return lines, count.PageCount, nil
+}
+
+// appendChars groups a page's characters, in PDFium's text order, into lines.
+// Each character is read once; control characters count as spaces. A line's
+// font size is the size of most of its characters.
+func appendChars(lines []line, page int, chars []*responses.GetPageTextStructuredChar) []line {
+	first := len(lines)
+	weights := map[float64]int{}
+	finish := func() {
+		if len(lines) > first {
+			l := &lines[len(lines)-1]
+			best := -1
+			for size, count := range weights {
+				if count > best || count == best && size < l.size {
+					l.size, best = size, count
+				}
+			}
+			clear(weights)
+		}
+	}
+	for _, char := range chars {
+		r, _ := utf8.DecodeRuneInString(char.Text)
+		if char.Text == "" || unicode.IsSpace(r) || unicode.IsControl(r) {
+			if len(lines) > first {
+				lines[len(lines)-1].space = true
+			}
+			continue
+		}
+		size := 0.0
+		if char.FontInformation != nil {
+			size = char.FontInformation.RenderedSize
+		}
+		position := char.PointPosition
+		center := (position.Top + position.Bottom) / 2
+		current := len(lines) - 1
+		if current < first || center < lines[current].bottom || center > lines[current].top ||
+			position.Left < lines[current].right-max(size, lines[current].height())*2 {
+			finish()
+			lines = append(lines, line{page: page, text: char.Text,
+				left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
+			weights[size]++
+			continue
+		}
+		l := &lines[current]
+		last, _ := utf8.DecodeLastRuneInString(l.text)
+		// A gap between characters reads as a space unless either side is CJK.
+		if l.space || position.Left-l.right > max(size, l.height())*0.2 && last < wideRune && r < wideRune {
+			if !strings.HasSuffix(l.text, " ") {
+				l.text += " "
+			}
+		}
+		l.space = false
+		l.text += char.Text
+		weights[size]++
+		l.right, l.top, l.bottom = max(l.right, position.Right), max(l.top, position.Top), min(l.bottom, position.Bottom)
+	}
+	finish()
+	return lines
 }
 
 // render writes lines as Markdown with one section per page.

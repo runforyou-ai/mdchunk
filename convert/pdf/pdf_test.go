@@ -22,6 +22,7 @@ type text struct {
 	size float64
 	y    float64
 	s    string
+	x    float64 // 0 means the left margin, 72
 }
 
 // build writes a PDF with one page per entry, using Helvetica. A non-empty
@@ -40,7 +41,11 @@ func build(t testing.TB, pages [][]text, userPassword string) []byte {
 	for _, lines := range pages {
 		var content strings.Builder
 		for _, l := range lines {
-			fmt.Fprintf(&content, "BT /F1 %g Tf 72 %g Td (%s) Tj ET\n", l.size, l.y, l.s)
+			x := l.x
+			if x == 0 {
+				x = 72
+			}
+			fmt.Fprintf(&content, "BT /F1 %g Tf %g %g Td (%s) Tj ET\n", l.size, x, l.y, l.s)
 		}
 		stream := add(fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", content.Len(), content.String()))
 		page := add(fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>", pagesID, font, stream))
@@ -105,9 +110,9 @@ func run(t *testing.T, data []byte) (convert.Document, error) {
 
 func TestPages(t *testing.T) {
 	data := build(t, [][]text{
-		{{24, 700, "Annual Report"}, {12, 660, "Revenue grew in every region this year,"}, {12, 646, "led by strong demand."}, {12, 600, "- not a list"}},
+		{{24, 700, "Annual Report", 0}, {12, 660, "Revenue grew in every region this year,", 0}, {12, 646, "led by strong demand.", 0}, {12, 600, "- not a list", 0}},
 		{},
-		{{18, 700, "Outlook"}, {12, 660, "Next year looks steady."}},
+		{{18, 700, "Outlook", 0}, {12, 660, "Next year looks steady.", 0}},
 	}, "")
 	doc, err := run(t, data)
 	if err != nil {
@@ -140,13 +145,88 @@ func TestPages(t *testing.T) {
 func TestNoHeadingsAndNoText(t *testing.T) {
 	c := pdf.New(pdf.Options{NoHeadings: true, Workers: 1})
 	defer func() { _ = c.Close() }()
-	doc, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(build(t, [][]text{{{24, 700, "Title"}, {12, 650, "Body text here."}}}, ""))})
+	doc, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(build(t, [][]text{{{24, 700, "Title", 0}, {12, 650, "Body text here.", 0}}}, ""))})
 	if err != nil || doc.Markdown != "Title\n\nBody text here." {
 		t.Errorf("got %q, %v", doc.Markdown, err)
 	}
 	doc, err = run(t, build(t, [][]text{{}, {}}, ""))
 	if err != nil || doc.Markdown != "" || len(doc.Sections) != 2 || doc.Sections[1].Start != 0 {
 		t.Errorf("no text: %+v, %v", doc, err)
+	}
+}
+
+func TestLayout(t *testing.T) {
+	body := text{12, 600, "This body paragraph is long enough to outweigh every heading on the page.", 0}
+	for name, tc := range map[string]struct {
+		lines []text
+		want  string
+	}{
+		"same line":    {[]text{{12, 700, "Hello", 0}, {12, 700, "world", 110}}, "Hello world"},
+		"overlapping":  {[]text{{12, 700, "above", 0}, {12, 697, "below", 0}}, "above\nbelow"},
+		"continuation": {[]text{{24, 700, "Line one", 0}, {24, 676, "Line two", 0}, body}, "# Line one Line two\n\n" + body.s},
+		"levels": {[]text{{30, 740, "Alpha", 0}, {24, 700, "Beta", 0}, {18, 660, "Gamma", 0}, {14, 630, "Delta", 0}, body},
+			"# Alpha\n\n## Beta\n\n### Gamma\n\n### Delta\n\n" + body.s},
+		"embedded newline": {[]text{{24, 700, `Title\n# hidden`, 0}, body}, "# Title # hidden\n\n" + body.s},
+		"carriage return":  {[]text{{12, 700, `first\rsecond`, 0}}, "first second"},
+	} {
+		doc, err := run(t, build(t, [][]text{tc.lines}, ""))
+		if err != nil || doc.Markdown != tc.want {
+			t.Errorf("%s: got %q, %v\nwant %q", name, doc.Markdown, err, tc.want)
+		}
+	}
+}
+
+// cancelOnEOF cancels a context when its reader is drained.
+type cancelOnEOF struct {
+	r      io.Reader
+	cancel func()
+}
+
+func (c cancelOnEOF) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		c.cancel()
+	}
+	return n, err
+}
+
+func TestSourceLimitAndCancel(t *testing.T) {
+	data := build(t, [][]text{{{12, 700, "x", 0}}, {{12, 700, "y", 0}}}, "")
+	c := pdf.New(pdf.Options{Limits: convert.Limits{MaxBytes: int64(len(data)) - 1}})
+	defer func() { _ = c.Close() }()
+	var limit *convert.LimitError
+	if _, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); !errors.As(err, &limit) || limit.Limit != convert.LimitSource {
+		t.Errorf("source limit: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := converter.Convert(ctx, convert.Input{Reader: cancelOnEOF{bytes.NewReader(data), cancel}}); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancel after reading: %v", err)
+	}
+}
+
+func TestConcurrentClose(t *testing.T) {
+	data := build(t, [][]text{{{12, 700, "hello", 0}}}, "")
+	c := pdf.New(pdf.Options{Workers: 1})
+	if _, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); err != nil {
+		t.Fatal(err)
+	}
+	blocker := &slowReader{release: make(chan struct{}), data: data}
+	go func() { _, _ = c.Convert(context.Background(), convert.Input{Reader: blocker}) }()
+	time.Sleep(50 * time.Millisecond)
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- c.Close() }()
+	}
+	select {
+	case <-results:
+		t.Fatal("a Close returned before the conversion in flight finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(blocker.release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Errorf("Close: %v", err)
+		}
 	}
 }
 
@@ -157,21 +237,23 @@ func TestErrors(t *testing.T) {
 	}{
 		"empty":     {nil, convert.ErrCorrupt},
 		"garbage":   {[]byte("%PDF-1.4 not really"), convert.ErrCorrupt},
-		"encrypted": {build(t, [][]text{{{12, 700, "secret"}}}, "user"), convert.ErrEncrypted},
+		"encrypted": {build(t, [][]text{{{12, 700, "secret", 0}}}, "user"), convert.ErrEncrypted},
 	} {
 		if _, err := run(t, tc.data); !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", name, err, tc.want)
 		}
 	}
-	_, err := pdf.New(pdf.Options{Limits: convert.Limits{MaxOutputBytes: 5}}).Convert(context.Background(),
-		convert.Input{Reader: bytes.NewReader(build(t, [][]text{{{12, 700, "more than five"}}}, ""))})
+	small := pdf.New(pdf.Options{Limits: convert.Limits{MaxOutputBytes: 5}})
+	defer func() { _ = small.Close() }()
+	_, err := small.Convert(context.Background(),
+		convert.Input{Reader: bytes.NewReader(build(t, [][]text{{{12, 700, "more than five", 0}}}, ""))})
 	if !errors.Is(err, convert.ErrTooLarge) {
 		t.Errorf("output limit: %v", err)
 	}
 }
 
 func TestLifecycle(t *testing.T) {
-	data := build(t, [][]text{{{12, 700, "hello"}}}, "")
+	data := build(t, [][]text{{{12, 700, "hello", 0}}}, "")
 	c := pdf.New(pdf.Options{Workers: 1})
 	var wg sync.WaitGroup
 	for range 4 {

@@ -414,11 +414,13 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   drops a part together with its relationship, can still convert to less
   text, as a file holding less text would.
 - `convert/pdf`: `pdf.New(opts)` returns `*pdf.Converter` with `Close() error`.
-  One `KindPage` section per page. Text lines are grouped by font size: the
-  dominant size is body text, larger short lines become headings
-  (`NoHeadings` disables this), paragraphs break on spacing or size changes.
-  Reading order follows PDFium's text order; multi-column layout and table
-  recovery are not attempted. Encrypted files return `ErrEncrypted`.
+  One `KindPage` section per page. Characters are read once each, in PDFium's
+  text order, and grouped into lines by position; control characters count as
+  spaces. The dominant font size is body text, larger short lines become
+  headings (`NoHeadings` disables this), and paragraphs break on spacing or
+  size changes. Multi-column layout and table recovery are not attempted.
+  Documents that need a password to open return `ErrEncrypted`; documents
+  restricted only by an owner password convert normally.
 - `convert/all`: `all.New(opts) (*all.Registry, error)`. Embeds
   `*convert.Registry` with every format above registered, and `Close` releases
   the converters it created (the PDF pool), not ones registered later.
@@ -432,7 +434,7 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
 - `Close` is idempotent. It marks the converter closed; calls that hold a
   worker finish and are waited for; calls still waiting for a worker, or woken
   after the mark, return `ErrClosed`. Once the calls in flight finish, the
-  instances are released.
+  instances are released; every call to `Close` returns only after that.
 
 ## Testing
 
