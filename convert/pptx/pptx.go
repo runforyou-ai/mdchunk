@@ -10,6 +10,7 @@ package pptx
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -40,6 +41,7 @@ func New(opts Options) *Converter {
 
 // slide renders one slide's parts.
 type slide struct {
+	ctx           context.Context
 	pkg           *ooxml.Package
 	relationships map[string]ooxml.Relationship
 	limits        convert.Limits
@@ -60,12 +62,12 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, err
 	}
-	presentation, err := pkg.ReadPart("ppt/presentation.xml")
+	presentation, err := pkg.RequirePart("ppt/presentation.xml")
 	if err != nil {
 		return convert.Document{}, err
 	}
 	if presentation.Child("presentation") == nil {
-		return convert.Document{}, fmt.Errorf("%w: ppt/presentation.xml missing", convert.ErrCorrupt)
+		return convert.Document{}, fmt.Errorf("%w: ppt/presentation.xml has no presentation", convert.ErrCorrupt)
 	}
 	relationships, err := pkg.Relationships("ppt/presentation.xml")
 	if err != nil {
@@ -73,11 +75,13 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	}
 	w := mdwrite.New(limits.MaxOutputBytes)
 	var sections []convert.Section
-	for number, item := range presentation.Child("presentation").Child("sldIdLst").Elements() {
-		if err := ctx.Err(); err != nil {
-			return convert.Document{}, err
+	number := 0
+	for _, item := range presentation.Child("presentation").Child("sldIdLst").Elements() {
+		if item.Name != "sldId" {
+			continue
 		}
-		blocks, title, err := c.slide(pkg, relationships[item.Attr("r:id")].Target, limits)
+		number++
+		blocks, title, err := c.slide(ctx, pkg, relationships[item.Attr("r:id")].Target, limits)
 		if err != nil {
 			return convert.Document{}, err
 		}
@@ -87,7 +91,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		}
 		start := w.Len()
 		w.WriteString(strings.Join(blocks, "\n\n"))
-		sections = append(sections, convert.Section{Kind: convert.KindSlide, Number: number + 1, Name: title, Start: start, End: w.Len()})
+		sections = append(sections, convert.Section{Kind: convert.KindSlide, Number: number, Name: title, Start: start, End: w.Len()})
 	}
 	if err := w.Err(); err != nil {
 		return convert.Document{}, err
@@ -96,19 +100,25 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 }
 
 // slide renders the slide at target and returns its blocks and title.
-func (c *Converter) slide(pkg *ooxml.Package, target string, limits convert.Limits) ([]string, string, error) {
-	root, err := pkg.ReadPart(target)
+func (c *Converter) slide(ctx context.Context, pkg *ooxml.Package, target string, limits convert.Limits) ([]string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	root, err := pkg.RequirePart(target)
 	if err != nil {
 		return nil, "", err
 	}
-	if root.Child("sld").Attr("show") == "0" && !c.opts.IncludeHidden {
+	if root.Child("sld") == nil {
+		return nil, "", fmt.Errorf("%w: %s is not a slide", convert.ErrCorrupt, target)
+	}
+	if show := root.Child("sld").Attr("show"); (show == "0" || show == "false") && !c.opts.IncludeHidden {
 		return nil, "", nil
 	}
 	relationships, err := pkg.Relationships(target)
 	if err != nil {
 		return nil, "", err
 	}
-	s := &slide{pkg: pkg, relationships: relationships, limits: limits}
+	s := &slide{ctx: ctx, pkg: pkg, relationships: relationships, limits: limits}
 	var blocks []string
 	if err := s.blocks(root.Child("sld").Child("cSld").Child("spTree"), &blocks); err != nil {
 		return nil, "", err
@@ -117,11 +127,17 @@ func (c *Converter) slide(pkg *ooxml.Package, target string, limits convert.Limi
 		return blocks, s.title, nil
 	}
 	// Only the notes body placeholder is speaker notes; the slide image and number are not.
-	for _, item := range relationships {
+	ids := make([]string, 0, len(relationships))
+	for id := range relationships {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		item := relationships[id]
 		if item.Type != "notesSlide" {
 			continue
 		}
-		notes, err := pkg.ReadPart(item.Target)
+		notes, err := pkg.RequirePart(item.Target)
 		if err != nil {
 			return nil, "", err
 		}
@@ -139,6 +155,9 @@ func (c *Converter) slide(pkg *ooxml.Package, target string, limits convert.Limi
 // blocks renders text boxes, tables and charts in shape order, unwrapping groups.
 func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 	for _, shape := range tree.Elements() {
+		if err := s.ctx.Err(); err != nil {
+			return err
+		}
 		switch shape.Name {
 		case "sp":
 			text := shapeText(shape)
@@ -166,7 +185,7 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 				}
 				continue
 			}
-			table := mdwrite.NewTable(s.limits.MaxOutputBytes)
+			table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
 			for _, row := range data.Child("tbl").Elements() {
 				if row.Name != "tr" {
 					continue
@@ -181,7 +200,7 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 					return err
 				}
 			}
-			if markdown := table.Markdown(true); markdown != "" {
+			if markdown := table.Markdown(); markdown != "" {
 				*blocks = append(*blocks, markdown)
 			}
 		case "grpSp":
@@ -197,22 +216,24 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 	return nil
 }
 
-// chart renders a chart's title and data table: categories in the first column, one column per series.
+// chart renders a chart's title and data table: categories (or x values) in the
+// first column, one column of values (or y values) per series.
 func (s *slide) chart(target string) (string, error) {
-	if target == "" {
-		return "", nil
-	}
-	root, err := s.pkg.ReadPart(target)
+	root, err := s.pkg.RequirePart(target)
 	if err != nil {
 		return "", err
 	}
 	chart := root.Child("chartSpace").Child("chart")
 	header := []string{""}
 	var columns [][]string
-	var categories []string
+	var labels []string
 	for _, plot := range chart.Child("plotArea").Elements() {
 		for _, series := range plot.Elements() {
-			if series.Name != "ser" || series.Child("val") == nil {
+			values, categories := series.Child("val"), series.Child("cat")
+			if values == nil {
+				values, categories = series.Child("yVal"), series.Child("xVal")
+			}
+			if series.Name != "ser" || values == nil {
 				continue
 			}
 			// The series name comes from the reference cache, or from a literal value.
@@ -223,27 +244,27 @@ func (s *slide) chart(target string) (string, error) {
 				name = value.Text
 			}
 			header = append(header, name)
-			columns = append(columns, cacheValues(series.Child("val")))
-			if len(categories) == 0 {
-				categories = cacheValues(series.Child("cat"))
+			columns = append(columns, cacheValues(values))
+			if len(labels) == 0 {
+				labels = cacheValues(categories)
 			}
 		}
 	}
 	if len(columns) == 0 {
 		return "", nil
 	}
-	table := mdwrite.NewTable(s.limits.MaxOutputBytes)
-	if err := table.Add(header); err != nil {
+	table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
+	if err := table.SetHeader(header); err != nil {
 		return "", err
 	}
-	count := len(categories)
+	count := len(labels)
 	for _, column := range columns {
 		count = max(count, len(column))
 	}
 	for index := range count {
 		row := []string{""}
-		if index < len(categories) {
-			row[0] = categories[index]
+		if index < len(labels) {
+			row[0] = labels[index]
 		}
 		for _, column := range columns {
 			value := ""
@@ -256,8 +277,12 @@ func (s *slide) chart(target string) (string, error) {
 			return "", err
 		}
 	}
-	markdown := table.Markdown(true)
-	if title := strings.Join(strings.Fields(slideText(chart.Child("title"))), " "); title != "" {
+	markdown := table.Markdown()
+	title := strings.Join(strings.Fields(slideText(chart.Child("title"))), " ")
+	if title == "" {
+		title = strings.Join(cacheValues(chart.Child("title").Child("tx")), " ")
+	}
+	if title != "" {
 		return mdwrite.Paragraph(title) + "\n\n" + markdown, nil
 	}
 	return markdown, nil

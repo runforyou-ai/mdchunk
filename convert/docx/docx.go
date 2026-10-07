@@ -19,6 +19,12 @@ import (
 	"github.com/runforyou-ai/mdchunk/internal/source"
 )
 
+// maxListDepth is the deepest list level Word supports, counted from 0.
+const maxListDepth = 8
+
+// linkTarget encodes the characters an angle-bracket link destination cannot hold.
+var linkTarget = strings.NewReplacer("<", "%3C", ">", "%3E", "\n", "%0A")
+
 // Options configures the Word converter. The zero value is the default.
 type Options struct {
 	convert.Limits
@@ -41,7 +47,9 @@ type document struct {
 	headings map[string]int
 	ordered  map[string]map[string]bool
 	links    map[string]string
-	inCell   bool // table cells are not escaped: block markers have no effect there
+	// styleLists holds the numbering a paragraph style applies.
+	styleLists map[string]*ooxml.Node
+	inCell     bool // table cells are not escaped: block markers have no effect there
 }
 
 // Convert converts in to Markdown.
@@ -58,7 +66,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, err
 	}
-	root, err := pkg.ReadPart("word/document.xml")
+	root, err := pkg.RequirePart("word/document.xml")
 	if err != nil {
 		return convert.Document{}, err
 	}
@@ -66,7 +74,8 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if body == nil {
 		return convert.Document{}, fmt.Errorf("%w: word/document.xml has no body", convert.ErrCorrupt)
 	}
-	d := &document{ctx: ctx, limits: limits, headings: map[string]int{}, ordered: map[string]map[string]bool{}, links: map[string]string{}}
+	d := &document{ctx: ctx, limits: limits, headings: map[string]int{}, ordered: map[string]map[string]bool{},
+		links: map[string]string{}, styleLists: map[string]*ooxml.Node{}}
 	if err := d.load(pkg); err != nil {
 		return convert.Document{}, err
 	}
@@ -107,8 +116,15 @@ func (d *document) load(pkg *ooxml.Package) error {
 		} else if outline, err := strconv.Atoi(style.Child("pPr").Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
 			level = outline + 1
 		}
-		if style.Name == "style" && level > 0 {
-			d.headings[style.Attr("styleId")] = level
+		id := style.Attr("styleId")
+		if style.Name != "style" || id == "" {
+			continue
+		}
+		if level > 0 {
+			d.headings[id] = level
+		}
+		if list := style.Child("pPr").Child("numPr"); list != nil {
+			d.styleLists[id] = list
 		}
 	}
 	numbering, err := pkg.ReadPart("word/numbering.xml")
@@ -172,7 +188,8 @@ func (d *document) paragraph(node *ooxml.Node) string {
 		return ""
 	}
 	properties := node.Child("pPr")
-	level := d.headings[properties.Child("pStyle").Attr("val")]
+	style := properties.Child("pStyle").Attr("val")
+	level := d.headings[style]
 	if outline, err := strconv.Atoi(properties.Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
 		level = outline + 1
 	}
@@ -182,14 +199,24 @@ func (d *document) paragraph(node *ooxml.Node) string {
 	if d.inCell {
 		return text
 	}
-	if list := properties.Child("numPr"); list != nil {
-		depth, _ := strconv.Atoi(list.Child("ilvl").Attr("val"))
+	list := properties.Child("numPr")
+	if list == nil {
+		list = d.styleLists[style]
+	}
+	// numId 0 removes numbering; a missing level is level 0.
+	if numID := list.Child("numId").Attr("val"); list != nil && numID != "0" {
+		ilvl := list.Child("ilvl").Attr("val")
+		if ilvl == "" {
+			ilvl = "0"
+		}
+		depth, _ := strconv.Atoi(ilvl)
 		marker := "- "
-		if d.ordered[list.Child("numId").Attr("val")][list.Child("ilvl").Attr("val")] {
+		if d.ordered[numID][ilvl] {
 			marker = "1. "
 		}
-		indent := strings.Repeat("  ", max(depth, 0))
-		return indent + marker + strings.ReplaceAll(mdwrite.Paragraph(text), "\n", "\n"+indent+"  ")
+		// Three spaces per level reach the content of both "1. " and "- " parents.
+		indent := strings.Repeat("   ", min(max(depth, 0), maxListDepth))
+		return indent + marker + strings.ReplaceAll(mdwrite.Paragraph(text), "\n", "\n"+indent+"   ")
 	}
 	return mdwrite.Paragraph(text)
 }
@@ -213,7 +240,7 @@ func (d *document) text(node *ooxml.Node, builder *strings.Builder) {
 			var label strings.Builder
 			d.text(child, &label)
 			text := strings.NewReplacer("[", `\[`, "]", `\]`).Replace(strings.Join(strings.Fields(label.String()), " "))
-			builder.WriteString("[" + text + "](<" + strings.ReplaceAll(target, ">", "%3E") + ">)")
+			builder.WriteString("[" + text + "](<" + linkTarget.Replace(target) + ">)")
 		case "pPr", "rPr", "drawing", "pict", "object", "Fallback":
 		default:
 			d.text(child, builder)
@@ -223,7 +250,7 @@ func (d *document) text(node *ooxml.Node, builder *strings.Builder) {
 
 // table renders a table; horizontal spans repeat the cell and vertical merges carry the value down.
 func (d *document) table(node *ooxml.Node) (string, error) {
-	table := mdwrite.NewTable(d.limits.MaxOutputBytes)
+	table := mdwrite.NewTable(d.limits.MaxOutputBytes, true)
 	var previous []string
 	for _, row := range node.Children {
 		if row.Name != "tr" {
@@ -260,5 +287,5 @@ func (d *document) table(node *ooxml.Node) (string, error) {
 		}
 		previous = cells
 	}
-	return table.Markdown(true), nil
+	return table.Markdown(), nil
 }

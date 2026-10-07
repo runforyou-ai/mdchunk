@@ -127,6 +127,47 @@ func TestOptions(t *testing.T) {
 	}
 }
 
+func TestHiddenFalse(t *testing.T) {
+	data := deck(t, nil, shape("", "shown"), "hidden:"+shape("", "secret"))
+	data = bytes.Replace(data, []byte(`show="0"`), []byte(`show="false"`), 1)
+	if doc := run(t, pptx.Options{}, data); doc.Markdown != "shown" {
+		t.Errorf("got %q", doc.Markdown)
+	}
+}
+
+func TestCharts(t *testing.T) {
+	scatter := `<c:chartSpace ` + ns + `><c:chart><c:title><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>趋势</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title><c:plotArea><c:scatterChart>
+<c:ser><c:xVal><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:xVal>
+<c:yVal><c:numRef><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:numRef></c:yVal></c:ser>
+</c:scatterChart></c:plotArea></c:chart></c:chartSpace>`
+	data := deckWithChart(t, scatter)
+	want := "趋势\n\n|  |  |\n| --- | --- |\n| 1 | 5 |\n| 2 | 7 |"
+	if doc := run(t, pptx.Options{}, data); doc.Markdown != want {
+		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
+	}
+}
+
+// deckWithChart builds a one-slide deck whose chart part is chart.
+func deckWithChart(t *testing.T, chart string) []byte {
+	t.Helper()
+	files := map[string]string{
+		"ppt/presentation.xml":             `<p:presentation ` + ns + `><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>`,
+		"ppt/_rels/presentation.xml.rels":  fmt.Sprintf(rels, rel("rId1", "slide", "slides/slide1.xml")),
+		"ppt/slides/slide1.xml":            `<p:sld ` + ns + `><p:cSld><p:spTree>` + chartFrame + `</p:spTree></p:cSld></p:sld>`,
+		"ppt/slides/_rels/slide1.xml.rels": fmt.Sprintf(rels, rel("rIdChart", "chart", "../charts/chart1.xml")),
+		"ppt/charts/chart1.xml":            chart,
+	}
+	return ooxmltest.Build(t, files)
+}
+
+func TestStrict(t *testing.T) {
+	data := deck(t, nil, shape("title", "严格"))
+	data = bytes.ReplaceAll(data, []byte("http://schemas.openxmlformats.org/officeDocument/2006/relationships"), []byte("http://purl.oclc.org/ooxml/officeDocument/relationships"))
+	if doc := run(t, pptx.Options{}, data); doc.Markdown != "# 严格" {
+		t.Errorf("got %q", doc.Markdown)
+	}
+}
+
 func TestErrors(t *testing.T) {
 	for name, tc := range map[string]struct {
 		data []byte
@@ -135,6 +176,10 @@ func TestErrors(t *testing.T) {
 		"empty":           {nil, convert.ErrCorrupt},
 		"encrypted":       {ooxmltest.Encrypted(), convert.ErrEncrypted},
 		"no presentation": {ooxmltest.Build(t, map[string]string{"x.xml": "<x/>"}), convert.ErrCorrupt},
+		"missing slide": {ooxmltest.Build(t, map[string]string{
+			"ppt/presentation.xml":            `<p:presentation ` + ns + `><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>`,
+			"ppt/_rels/presentation.xml.rels": fmt.Sprintf(rels, rel("rId1", "slide", "slides/slide1.xml")),
+		}), convert.ErrCorrupt},
 	} {
 		_, err := pptx.New(pptx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(tc.data)})
 		if !errors.Is(err, tc.want) {

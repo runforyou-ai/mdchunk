@@ -9,14 +9,19 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"path"
 	"strings"
 
 	"github.com/runforyou-ai/mdchunk/convert"
 )
 
-// relationshipNamespace qualifies relationship attributes, which are keyed with an "r:" prefix.
-const relationshipNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+// relationshipNamespaces qualify relationship attributes in Transitional and
+// Strict documents; such attributes are keyed with an "r:" prefix.
+var relationshipNamespaces = map[string]bool{
+	"http://schemas.openxmlformats.org/officeDocument/2006/relationships": true,
+	"http://purl.oclc.org/ooxml/officeDocument/relationships":             true,
+}
 
 // oleMagic starts a Compound File Binary, used by encrypted OOXML and legacy Office formats.
 var oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
@@ -111,7 +116,7 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 	defer func() { _ = file.Close() }()
 	var reader io.Reader = file
 	var limited *io.LimitedReader
-	if p.max >= 0 {
+	if p.max >= 0 && p.remaining < math.MaxInt64 {
 		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
 		reader = limited
 		defer func() { p.remaining = max(limited.N-1, 0) }()
@@ -135,7 +140,7 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 			node := &Node{Name: token.Name.Local, Attrs: make(map[string]string, len(token.Attr))}
 			for _, attr := range token.Attr {
 				key := attr.Name.Local
-				if attr.Name.Space == relationshipNamespace {
+				if relationshipNamespaces[attr.Name.Space] {
 					key = "r:" + key
 				}
 				node.Attrs[key] = attr.Value
@@ -151,6 +156,19 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 			stack[len(stack)-1].Text += string(token)
 		}
 	}
+}
+
+// RequirePart is ReadPart for a part the document cannot do without; a missing
+// part returns convert.ErrCorrupt.
+func (p *Package) RequirePart(name string) (*Node, error) {
+	if name == "" {
+		return nil, fmt.Errorf("%w: missing relationship target", convert.ErrCorrupt)
+	}
+	root, err := p.ReadPart(name)
+	if err == nil && root == nil {
+		return nil, fmt.Errorf("%w: missing part %s", convert.ErrCorrupt, name)
+	}
+	return root, err
 }
 
 // Relationships reads the relationships of part. Internal targets resolve against
