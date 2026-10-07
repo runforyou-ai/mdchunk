@@ -373,11 +373,14 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   text is. `text.JSON(opts)` wraps the decoded text in a `json` fence longer
   than any backtick run it contains.
 - `convert/html`: `html.New(opts)`. CommonMark with GFM tables. Before
-  conversion every table is expanded to a rectangular grid: spans, clamped to
-  the HTML standard's 1000 columns and 65534 rows, repeat their cell; short rows
-  are padded; pipes in code inside cells are escaped. The expanded cells must
-  fit the output limit at three bytes each, or the conversion fails with an
-  output `LimitError` before any expansion. A table without header cells
+  conversion every table, innermost first, is expanded to a rectangular grid:
+  spans, clamped to the HTML standard's 1000 columns and 65534 rows and kept
+  within their row group, repeat their cell; short rows are padded; pipes in
+  inline code (`code`, `var`, `samp`, `kbd`, `tt`) inside cells are escaped.
+  Before a table is expanded, a lower bound of its rendered size (each copy of
+  a cell counts its non-whitespace text, one byte per element and three bytes
+  of table syntax) must fit what is left of the output limit, or the
+  conversion fails with an output `LimitError`. A table without header cells
   promotes its first row; relative links resolve against `Input.BaseURL`. The
   underlying library builds the whole output and ignores the context, so the
   output limit and cancellation are checked again once it returns.

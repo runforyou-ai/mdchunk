@@ -77,6 +77,13 @@ func TestTables(t *testing.T) {
 			"| k | v |\n|---|---|\n| a | 1 |\n| a | 2 |\n| b | 3 |\n| c | 3 |"},
 		"ragged rows": {`<table><tr><th>x</th></tr><tr><td>1</td><td>2</td></tr></table>`,
 			"| x |  |\n|---|---|\n| 1 | 2 |"},
+		"nested adjacent colspans": {`<table><tr><th>outer</th></tr><tr><td><table><tr><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th></tr>
+<tr><td colspan="3">A</td><td colspan="2">B</td><td>C</td></tr></table></td></tr></table>`, "| A | A | A | B | B | C |"},
+		"row groups": {`<table><thead><tr><th>k</th><th>v</th></tr></thead><tbody><tr><td rowspan="0">A</td><td>1</td></tr></tbody>
+<tbody><tr><td>B</td><td>2</td></tr></tbody></table>`, "| A | 1 |\n| B | 2 |"},
+		"overflowing span": {`<table><tr><th>h</th></tr><tr><td colspan="99999999999999999999">x</td></tr></table>`, "| x |" + strings.Repeat(" x |", 999)},
+		"inline code kinds": {`<table><tr><th>a</th><th>b</th><th>c</th><th>d</th></tr><tr><td><var>a|b</var></td><td><samp>c|d</samp></td><td><kbd>e|f</kbd></td><td><tt>g|h</tt></td></tr></table>`,
+			"| `a\\|b` | `c\\|d` | `e\\|f` | `g\\|h` |"},
 		"code pipe": {`<table><tr><th>c</th><th>d</th></tr><tr><td><code>a|b</code></td><td>x</td></tr></table>`,
 			"| c | d |\n|---|---|\n| `a\\|b` | x |"},
 	} {
@@ -97,6 +104,16 @@ func TestHugeSpans(t *testing.T) {
 	var limit *convert.LimitError
 	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != 1000 {
 		t.Errorf("cell budget: %v", err)
+	}
+	_, err = html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 3000}}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=1000>` + strings.Repeat("<b>x</b>", 128) + `</td></tr></table>`)})
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput {
+		t.Errorf("content budget: %v", err)
+	}
+	_, err = html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 12000}}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=1000 rowspan=2>x</td></tr><tr><td rowspan=1000>y</td></tr>` + strings.Repeat("<tr></tr>", 999) + `</table>`)})
+	if !errors.As(err, &limit) {
+		t.Errorf("sparse rows: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("huge spans took %v", elapsed)
@@ -177,11 +194,14 @@ func FuzzConvert(f *testing.F) {
 	for _, seed := range []string{"<p>x</p>", "<table><tr><td rowspan=3>a</td></tr></table>", "<meta charset=x>", "<<>>"} {
 		f.Add(seed)
 	}
-	c := html.New(html.Options{})
+	c := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 1 << 20}})
 	f.Fuzz(func(t *testing.T, src string) {
 		doc, err := c.Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)})
-		if err != nil && !errors.Is(err, convert.ErrCorrupt) {
+		if err != nil && !errors.Is(err, convert.ErrCorrupt) && !errors.Is(err, convert.ErrTooLarge) {
 			t.Fatal(err)
+		}
+		if err != nil && (doc.Markdown != "" || doc.Sections != nil) {
+			t.Fatalf("partial document on error: %q", doc.Markdown)
 		}
 		if strings.ContainsAny(doc.Markdown, "\r\x00") {
 			t.Fatalf("output not normalised: %q", doc.Markdown)

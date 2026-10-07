@@ -2,9 +2,10 @@
 //
 // The encoding comes from a BOM, then Input.Charset when it names a known
 // encoding, then the first <meta> charset declaration before <body>, then
-// UTF-8 or Options.Fallback. Tables are expanded to rectangular grids before
-// conversion: spans (clamped to the HTML standard's limits) repeat their cell,
-// short rows are padded, and the expansion is bounded by the output limit. A
+// UTF-8 or Options.Fallback. Tables, innermost first, are expanded to
+// rectangular grids before conversion: spans (clamped to the HTML standard's
+// limits and kept within their row group) repeat their cell, short rows are
+// padded, and a lower bound of the expanded size must fit the output limit. A
 // table without header cells promotes its first row, and relative links
 // resolve against Input.BaseURL.
 package html
