@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -25,10 +26,14 @@ func document(t *testing.T, body string) []byte {
 <w:style w:type="paragraph" w:styleId="Outline"><w:name w:val="Custom"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>
 <w:style w:type="paragraph"><w:name w:val="Title"/></w:style>
 <w:style w:type="paragraph" w:styleId="ListNumber"><w:name w:val="List Number"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Derived"><w:name w:val="Derived"/><w:basedOn w:val="ListNumber"/></w:style>
+<w:style w:type="paragraph" w:styleId="Linked"><w:name w:val="Linked"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="SubHeading"><w:name w:val="Sub"/><w:basedOn w:val="H2"/></w:style>
 </w:styles>`,
 		"word/numbering.xml": `<w:numbering ` + ns + `>
-<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>
+<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/><w:pStyle w:val="Linked"/></w:lvl></w:abstractNum>
 <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+<w:num w:numId="2"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:lvlOverride></w:num>
 </w:numbering>`,
 		"word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a" TargetMode="External"/>
@@ -86,6 +91,30 @@ func TestLists(t *testing.T) {
 	want := "1. no level\n\nnumbering removed\n\n1. from style\n\n1. outer\n\n   - inner\n\n" + strings.Repeat("   ", 8) + "- deep\n\nplain"
 	if doc.Markdown != want {
 		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
+	}
+}
+
+func TestNumberingInheritance(t *testing.T) {
+	body := p(`<w:pStyle w:val="ListNumber"/><w:numPr><w:ilvl w:val="1"/></w:numPr>`, "level from paragraph") +
+		p(`<w:pStyle w:val="Derived"/>`, "based on") +
+		p(`<w:pStyle w:val="Linked"/>`, "linked level") +
+		p(`<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>`, "override") +
+		p(`<w:pStyle w:val="SubHeading"/>`, "inherited heading")
+	doc, err := convertData(t, document(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "   - level from paragraph\n\n1. based on\n\n      1. linked level\n\n- override\n\n## inherited heading"
+	if doc.Markdown != want {
+		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
+	}
+}
+
+func TestUnlimitedExpansion(t *testing.T) {
+	data := document(t, p(``, "text"))
+	doc, err := docx.New(docx.Options{Limits: convert.Limits{MaxExpandedBytes: math.MaxInt64}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+	if err != nil || doc.Markdown != "text" {
+		t.Errorf("got %q, %v", doc.Markdown, err)
 	}
 }
 

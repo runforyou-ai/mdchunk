@@ -38,6 +38,11 @@ func shape(kind string, paragraphs ...string) string {
 // deck builds a presentation from slide trees; a slide tree starting with "hidden:" is hidden.
 func deck(t *testing.T, notes map[int]string, slides ...string) []byte {
 	t.Helper()
+	return ooxmltest.Build(t, deckFiles(notes, slides...))
+}
+
+// deckFiles returns the parts deck zips, for tests that edit them first.
+func deckFiles(notes map[int]string, slides ...string) map[string]string {
 	files := map[string]string{}
 	var ids, presRels strings.Builder
 	for i, tree := range slides {
@@ -64,7 +69,16 @@ func deck(t *testing.T, notes map[int]string, slides ...string) []byte {
 <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>一月</c:v></c:pt><c:pt idx="1"><c:v>二月</c:v></c:pt></c:strCache></c:strRef></c:cat>
 <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>12</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
 </c:barChart></c:plotArea></c:chart></c:chartSpace>`
-	return ooxmltest.Build(t, files)
+	return files
+}
+
+// edit applies replace to every part of files.
+func edit(files map[string]string, oldnew ...string) map[string]string {
+	replacer := strings.NewReplacer(oldnew...)
+	for name, content := range files {
+		files[name] = replacer.Replace(content)
+	}
+	return files
 }
 
 const chartFrame = `<p:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></p:graphicFrame>`
@@ -128,22 +142,46 @@ func TestOptions(t *testing.T) {
 }
 
 func TestHiddenFalse(t *testing.T) {
-	data := deck(t, nil, shape("", "shown"), "hidden:"+shape("", "secret"))
-	data = bytes.Replace(data, []byte(`show="0"`), []byte(`show="false"`), 1)
+	data := ooxmltest.Build(t, edit(deckFiles(nil, shape("", "shown"), "hidden:"+shape("", "secret")), `show="0"`, `show="false"`))
 	if doc := run(t, pptx.Options{}, data); doc.Markdown != "shown" {
 		t.Errorf("got %q", doc.Markdown)
 	}
 }
 
 func TestCharts(t *testing.T) {
-	scatter := `<c:chartSpace ` + ns + `><c:chart><c:title><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>趋势</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title><c:plotArea><c:scatterChart>
-<c:ser><c:xVal><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:xVal>
-<c:yVal><c:numRef><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:numRef></c:yVal></c:ser>
-</c:scatterChart></c:plotArea></c:chart></c:chartSpace>`
-	data := deckWithChart(t, scatter)
-	want := "趋势\n\n|  |  |\n| --- | --- |\n| 1 | 5 |\n| 2 | 7 |"
-	if doc := run(t, pptx.Options{}, data); doc.Markdown != want {
+	point := func(idx int, v string) string { return fmt.Sprintf(`<c:pt idx="%d"><c:v>%s</c:v></c:pt>`, idx, v) }
+	values := func(tag string, vs ...string) string {
+		var b strings.Builder
+		for i, v := range vs {
+			b.WriteString(point(i, v))
+		}
+		return `<c:` + tag + `><c:numRef><c:numCache>` + b.String() + `</c:numCache></c:numRef></c:` + tag + `>`
+	}
+	name := func(n string) string {
+		return `<c:tx><c:strRef><c:strCache>` + point(0, n) + `</c:strCache></c:strRef></c:tx>`
+	}
+	chart := `<c:chartSpace ` + ns + `><c:chart><c:title><c:tx><c:strRef><c:strCache>` + point(0, "趋势") + `</c:strCache></c:strRef></c:tx></c:title><c:plotArea>
+<c:scatterChart><c:ser>` + name("A") + values("xVal", "1", "2") + values("yVal", "5", "7") + `</c:ser>
+<c:ser>` + name("B") + values("xVal", "100", "200") + values("yVal", "6", "8") + `</c:ser></c:scatterChart>
+<c:bubbleChart><c:ser>` + values("xVal", "3") + values("yVal", "4") + values("bubbleSize", "9") + `</c:ser></c:bubbleChart>
+</c:plotArea></c:chart></c:chartSpace>`
+	want := "趋势\n\n|  | x | y | size |\n| --- | --- | --- | --- |\n| A | 1 | 5 |  |\n| A | 2 | 7 |  |\n| B | 100 | 6 |  |\n| B | 200 | 8 |  |\n|  | 3 | 4 | 9 |"
+	if doc := run(t, pptx.Options{}, deckWithChart(t, chart)); doc.Markdown != want {
 		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
+	}
+}
+
+func TestSlideListAndNotesOrder(t *testing.T) {
+	files := deckFiles(nil, shape("", "one"), shape("", "two"))
+	files["ppt/presentation.xml"] = strings.Replace(files["ppt/presentation.xml"], "<p:sldIdLst>", "<p:sldIdLst><p:extLst/>", 1)
+	notes := func(text string) string {
+		return `<p:notes ` + ns + `><p:cSld><p:spTree>` + shape("body", text) + `</p:spTree></p:cSld></p:notes>`
+	}
+	files["ppt/notesSlides/a.xml"], files["ppt/notesSlides/b.xml"] = notes("second"), notes("first")
+	files["ppt/slides/_rels/slide1.xml.rels"] = fmt.Sprintf(rels, rel("rId10", "notesSlide", "../notesSlides/a.xml")+rel("rId2", "notesSlide", "../notesSlides/b.xml"))
+	doc := run(t, pptx.Options{}, ooxmltest.Build(t, files))
+	if doc.Markdown != "one\n\nfirst\n\nsecond\n\ntwo" || len(doc.Sections) != 2 {
+		t.Errorf("got %q, %d sections", doc.Markdown, len(doc.Sections))
 	}
 }
 
@@ -161,8 +199,12 @@ func deckWithChart(t *testing.T, chart string) []byte {
 }
 
 func TestStrict(t *testing.T) {
-	data := deck(t, nil, shape("title", "严格"))
-	data = bytes.ReplaceAll(data, []byte("http://schemas.openxmlformats.org/officeDocument/2006/relationships"), []byte("http://purl.oclc.org/ooxml/officeDocument/relationships"))
+	files := edit(deckFiles(nil, shape("title", "严格")),
+		"http://schemas.openxmlformats.org/officeDocument/2006/relationships", "http://purl.oclc.org/ooxml/officeDocument/relationships")
+	if !strings.Contains(files["ppt/presentation.xml"], "purl.oclc.org") {
+		t.Fatal("namespace not replaced")
+	}
+	data := ooxmltest.Build(t, files)
 	if doc := run(t, pptx.Options{}, data); doc.Markdown != "# 严格" {
 		t.Errorf("got %q", doc.Markdown)
 	}

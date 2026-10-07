@@ -25,6 +25,16 @@ const maxListDepth = 8
 // linkTarget encodes the characters an angle-bracket link destination cannot hold.
 var linkTarget = strings.NewReplacer("<", "%3C", ">", "%3E", "\n", "%0A")
 
+// styleInfo is what a paragraph style contributes: its parent, heading level and numbering.
+type styleInfo struct {
+	basedOn     string
+	heading     int
+	numID, ilvl string
+}
+
+// maxStyleChain bounds how many basedOn links are followed.
+const maxStyleChain = 16
+
 // Options configures the Word converter. The zero value is the default.
 type Options struct {
 	convert.Limits
@@ -42,14 +52,16 @@ func New(opts Options) *Converter {
 
 // document holds what rendering a body needs: heading styles, list formats and link targets.
 type document struct {
-	ctx      context.Context
-	limits   convert.Limits
-	headings map[string]int
-	ordered  map[string]map[string]bool
-	links    map[string]string
-	// styleLists holds the numbering a paragraph style applies.
-	styleLists map[string]*ooxml.Node
-	inCell     bool // table cells are not escaped: block markers have no effect there
+	ctx     context.Context
+	limits  convert.Limits
+	ordered map[string]map[string]bool
+	links   map[string]string
+	styles  map[string]styleInfo
+	// numAbstract maps a numbering instance to its abstract definition, and
+	// styleLevels maps an abstract definition's styles to the levels they use.
+	numAbstract map[string]string
+	styleLevels map[string]map[string]string
+	inCell      bool // table cells are not escaped: block markers have no effect there
 }
 
 // Convert converts in to Markdown.
@@ -74,8 +86,9 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if body == nil {
 		return convert.Document{}, fmt.Errorf("%w: word/document.xml has no body", convert.ErrCorrupt)
 	}
-	d := &document{ctx: ctx, limits: limits, headings: map[string]int{}, ordered: map[string]map[string]bool{},
-		links: map[string]string{}, styleLists: map[string]*ooxml.Node{}}
+	d := &document{ctx: ctx, limits: limits, ordered: map[string]map[string]bool{},
+		links: map[string]string{}, styles: map[string]styleInfo{}, numAbstract: map[string]string{},
+		styleLevels: map[string]map[string]string{}}
 	if err := d.load(pkg); err != nil {
 		return convert.Document{}, err
 	}
@@ -107,25 +120,22 @@ func (d *document) load(pkg *ooxml.Package) error {
 		return err
 	}
 	for _, style := range styles.Child("styles").Elements() {
-		name := strings.ToLower(style.Child("name").Attr("val"))
-		level := 0
-		if name == "title" {
-			level = 1
-		} else if number, found := strings.CutPrefix(name, "heading "); found {
-			level, _ = strconv.Atoi(number)
-		} else if outline, err := strconv.Atoi(style.Child("pPr").Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
-			level = outline + 1
-		}
 		id := style.Attr("styleId")
 		if style.Name != "style" || id == "" {
 			continue
 		}
-		if level > 0 {
-			d.headings[id] = level
+		info := styleInfo{basedOn: style.Child("basedOn").Attr("val")}
+		name := strings.ToLower(style.Child("name").Attr("val"))
+		if name == "title" {
+			info.heading = 1
+		} else if number, found := strings.CutPrefix(name, "heading "); found {
+			info.heading, _ = strconv.Atoi(number)
+		} else if outline, err := strconv.Atoi(style.Child("pPr").Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
+			info.heading = outline + 1
 		}
-		if list := style.Child("pPr").Child("numPr"); list != nil {
-			d.styleLists[id] = list
-		}
+		list := style.Child("pPr").Child("numPr")
+		info.numID, info.ilvl = list.Child("numId").Attr("val"), list.Child("ilvl").Attr("val")
+		d.styles[id] = info
 	}
 	numbering, err := pkg.ReadPart("word/numbering.xml")
 	if err != nil {
@@ -135,19 +145,81 @@ func (d *document) load(pkg *ooxml.Package) error {
 	for _, item := range numbering.Child("numbering").Elements() {
 		switch item.Name {
 		case "abstractNum":
-			levels := map[string]bool{}
+			id := item.Attr("abstractNumId")
+			levels, linked := map[string]bool{}, map[string]string{}
 			for _, level := range item.Children {
 				if level.Name == "lvl" {
-					format := level.Child("numFmt").Attr("val")
-					levels[level.Attr("ilvl")] = format != "bullet" && format != "none" && format != ""
+					levels[level.Attr("ilvl")] = orderedFormat(level.Child("numFmt").Attr("val"))
+					if style := level.Child("pStyle").Attr("val"); style != "" {
+						linked[style] = level.Attr("ilvl")
+					}
 				}
 			}
-			abstract[item.Attr("abstractNumId")] = levels
+			abstract[id], d.styleLevels[id] = levels, linked
 		case "num":
-			d.ordered[item.Attr("numId")] = abstract[item.Child("abstractNumId").Attr("val")]
+			id, base := item.Attr("numId"), item.Child("abstractNumId").Attr("val")
+			d.numAbstract[id] = base
+			// Level overrides replace the abstract definition's formats for this instance only.
+			levels := map[string]bool{}
+			for ilvl, ordered := range abstract[base] {
+				levels[ilvl] = ordered
+			}
+			for _, override := range item.Children {
+				if override.Name == "lvlOverride" {
+					if format := override.Child("lvl").Child("numFmt"); format != nil {
+						levels[override.Attr("ilvl")] = orderedFormat(format.Attr("val"))
+					}
+				}
+			}
+			d.ordered[id] = levels
 		}
 	}
 	return nil
+}
+
+// orderedFormat reports whether a numbering format counts rather than bullets.
+func orderedFormat(format string) bool {
+	return format != "bullet" && format != "none" && format != ""
+}
+
+// styleHeading returns the heading level of a style or the styles it is based on.
+func (d *document) styleHeading(id string) int {
+	for range maxStyleChain {
+		info, ok := d.styles[id]
+		if !ok {
+			return 0
+		}
+		if info.heading > 0 {
+			return info.heading
+		}
+		id = info.basedOn
+	}
+	return 0
+}
+
+// styleNumbering returns the numbering instance and level a style applies,
+// following basedOn links; a level missing from the style comes from the
+// abstract numbering level linked to the style.
+func (d *document) styleNumbering(id string) (string, string) {
+	current := id
+	for range maxStyleChain {
+		info, ok := d.styles[current]
+		if !ok {
+			return "", ""
+		}
+		if info.numID != "" {
+			ilvl := info.ilvl
+			if ilvl == "" {
+				ilvl = d.styleLevels[d.numAbstract[info.numID]][id]
+			}
+			if ilvl == "" {
+				ilvl = d.styleLevels[d.numAbstract[info.numID]][current]
+			}
+			return info.numID, ilvl
+		}
+		current = info.basedOn
+	}
+	return "", ""
 }
 
 // blocks renders paragraphs and tables in document order, unwrapping content controls.
@@ -189,7 +261,7 @@ func (d *document) paragraph(node *ooxml.Node) string {
 	}
 	properties := node.Child("pPr")
 	style := properties.Child("pStyle").Attr("val")
-	level := d.headings[style]
+	level := d.styleHeading(style)
 	if outline, err := strconv.Atoi(properties.Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
 		level = outline + 1
 	}
@@ -199,13 +271,17 @@ func (d *document) paragraph(node *ooxml.Node) string {
 	if d.inCell {
 		return text
 	}
-	list := properties.Child("numPr")
-	if list == nil {
-		list = d.styleLists[style]
+	// Direct numbering overrides the style's; numId 0 removes numbering and a missing level is 0.
+	numID, ilvl := d.styleNumbering(style)
+	if list := properties.Child("numPr"); list != nil {
+		if id := list.Child("numId").Attr("val"); id != "" {
+			numID = id
+		}
+		if value := list.Child("ilvl").Attr("val"); value != "" {
+			ilvl = value
+		}
 	}
-	// numId 0 removes numbering; a missing level is level 0.
-	if numID := list.Child("numId").Attr("val"); list != nil && numID != "0" {
-		ilvl := list.Child("ilvl").Attr("val")
+	if numID != "" && numID != "0" {
 		if ilvl == "" {
 			ilvl = "0"
 		}

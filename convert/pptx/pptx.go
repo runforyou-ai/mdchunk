@@ -8,6 +8,7 @@
 package pptx
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -96,6 +97,9 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err := w.Err(); err != nil {
 		return convert.Document{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return convert.Document{}, err
+	}
 	return convert.Document{Markdown: w.String(), Sections: sections}, nil
 }
 
@@ -131,7 +135,8 @@ func (c *Converter) slide(ctx context.Context, pkg *ooxml.Package, target string
 	for id := range relationships {
 		ids = append(ids, id)
 	}
-	slices.Sort(ids)
+	// Relationship ids such as rId2 and rId10 sort by length first, then text.
+	slices.SortFunc(ids, func(a, b string) int { return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b)) })
 	for _, id := range ids {
 		item := relationships[id]
 		if item.Type != "notesSlide" {
@@ -216,42 +221,81 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 	return nil
 }
 
-// chart renders a chart's title and data table: categories (or x values) in the
-// first column, one column of values (or y values) per series.
+// chart renders a chart's title and data. Category series form one table with
+// categories in the first column and one column per series; scatter and
+// bubble series form a table with one row per point: series, x, y and size.
 func (s *slide) chart(target string) (string, error) {
 	root, err := s.pkg.RequirePart(target)
 	if err != nil {
 		return "", err
 	}
 	chart := root.Child("chartSpace").Child("chart")
-	header := []string{""}
-	var columns [][]string
-	var labels []string
+	var categorySeries, pointSeries []*ooxml.Node
 	for _, plot := range chart.Child("plotArea").Elements() {
 		for _, series := range plot.Elements() {
-			values, categories := series.Child("val"), series.Child("cat")
-			if values == nil {
-				values, categories = series.Child("yVal"), series.Child("xVal")
-			}
-			if series.Name != "ser" || values == nil {
-				continue
-			}
-			// The series name comes from the reference cache, or from a literal value.
-			name := ""
-			if names := cacheValues(series.Child("tx")); len(names) > 0 {
-				name = names[0]
-			} else if value := series.Child("tx").Child("v"); value != nil {
-				name = value.Text
-			}
-			header = append(header, name)
-			columns = append(columns, cacheValues(values))
-			if len(labels) == 0 {
-				labels = cacheValues(categories)
+			switch {
+			case series.Name != "ser":
+			case series.Child("val") != nil:
+				categorySeries = append(categorySeries, series)
+			case series.Child("yVal") != nil:
+				pointSeries = append(pointSeries, series)
 			}
 		}
 	}
-	if len(columns) == 0 {
+	var blocks []string
+	if title := chartTitle(chart.Child("title")); title != "" {
+		blocks = append(blocks, mdwrite.Paragraph(title))
+	}
+	if len(categorySeries) > 0 {
+		table, err := s.categoryTable(categorySeries)
+		if err != nil {
+			return "", err
+		}
+		blocks = append(blocks, table)
+	}
+	if len(pointSeries) > 0 {
+		table, err := s.pointTable(pointSeries)
+		if err != nil {
+			return "", err
+		}
+		blocks = append(blocks, table)
+	}
+	if len(categorySeries)+len(pointSeries) == 0 {
 		return "", nil
+	}
+	return strings.Join(blocks, "\n\n"), nil
+}
+
+// chartTitle returns a chart title from rich text or a cached string reference.
+func chartTitle(title *ooxml.Node) string {
+	if text := strings.Join(strings.Fields(slideText(title)), " "); text != "" {
+		return text
+	}
+	return strings.Join(cacheValues(title.Child("tx")), " ")
+}
+
+// seriesName returns a series name from its reference cache or literal value.
+func seriesName(series *ooxml.Node) string {
+	if names := cacheValues(series.Child("tx")); len(names) > 0 {
+		return names[0]
+	}
+	if value := series.Child("tx").Child("v"); value != nil {
+		return value.Text
+	}
+	return ""
+}
+
+// categoryTable renders category series: categories in the first column, one column per series.
+func (s *slide) categoryTable(series []*ooxml.Node) (string, error) {
+	header := []string{""}
+	var columns [][]string
+	var labels []string
+	for _, item := range series {
+		header = append(header, seriesName(item))
+		columns = append(columns, cacheValues(item.Child("val")))
+		if len(labels) == 0 {
+			labels = cacheValues(item.Child("cat"))
+		}
 	}
 	table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
 	if err := table.SetHeader(header); err != nil {
@@ -262,30 +306,56 @@ func (s *slide) chart(target string) (string, error) {
 		count = max(count, len(column))
 	}
 	for index := range count {
-		row := []string{""}
-		if index < len(labels) {
-			row[0] = labels[index]
+		if err := s.ctx.Err(); err != nil {
+			return "", err
 		}
+		row := []string{at(labels, index)}
 		for _, column := range columns {
-			value := ""
-			if index < len(column) {
-				value = column[index]
-			}
-			row = append(row, value)
+			row = append(row, at(column, index))
 		}
 		if err := table.Add(row); err != nil {
 			return "", err
 		}
 	}
-	markdown := table.Markdown()
-	title := strings.Join(strings.Fields(slideText(chart.Child("title"))), " ")
-	if title == "" {
-		title = strings.Join(cacheValues(chart.Child("title").Child("tx")), " ")
+	return table.Markdown(), nil
+}
+
+// pointTable renders scatter and bubble series with one row per point.
+func (s *slide) pointTable(series []*ooxml.Node) (string, error) {
+	header := []string{"", "x", "y"}
+	bubbles := slices.ContainsFunc(series, func(item *ooxml.Node) bool { return item.Child("bubbleSize") != nil })
+	if bubbles {
+		header = append(header, "size")
 	}
-	if title != "" {
-		return mdwrite.Paragraph(title) + "\n\n" + markdown, nil
+	table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
+	if err := table.SetHeader(header); err != nil {
+		return "", err
 	}
-	return markdown, nil
+	for _, item := range series {
+		name := seriesName(item)
+		xs, ys, sizes := cacheValues(item.Child("xVal")), cacheValues(item.Child("yVal")), cacheValues(item.Child("bubbleSize"))
+		for index := range max(len(xs), len(ys), len(sizes)) {
+			if err := s.ctx.Err(); err != nil {
+				return "", err
+			}
+			row := []string{name, at(xs, index), at(ys, index)}
+			if bubbles {
+				row = append(row, at(sizes, index))
+			}
+			if err := table.Add(row); err != nil {
+				return "", err
+			}
+		}
+	}
+	return table.Markdown(), nil
+}
+
+// at returns values[index], or "" beyond its end.
+func at(values []string, index int) string {
+	if index < len(values) {
+		return values[index]
+	}
+	return ""
 }
 
 // maxPoints bounds the data point index read from a chart cache.

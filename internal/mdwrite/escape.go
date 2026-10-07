@@ -68,6 +68,9 @@ func NewTable(maxBytes int64, firstRowHeader bool) *Table {
 
 // SetHeader sets the header row, keeping it even when its cells are empty.
 func (t *Table) SetHeader(row []string) error {
+	for _, cell := range t.header {
+		t.cellBytes -= int64(len(cell))
+	}
 	t.header, t.hasHeader, t.firstHeader = escapeCells(row), true, false
 	t.width = max(t.width, len(t.header))
 	for _, cell := range t.header {
