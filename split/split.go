@@ -199,7 +199,6 @@ func (s *Splitter) cut(l *layout, start, hard, prevEnd int) int {
 		return wider
 	}
 	// Keep a heading whole when it fits but its body's first line does not.
-	window = l.lastPositionAt(base + s.maxSize)
 	if i := sort.SearchInts(l.headingEnds, window+1) - 1; i >= 0 && l.headingEnds[i] > max(start, prevEnd) && usable(l.headingEnds[i]) {
 		return l.headingEnds[i]
 	}
