@@ -227,6 +227,19 @@ tables). Inputs longer than `math.MaxInt32` bytes panic.
 // (markdown→md, htm→html, yml→yaml).
 type Format string
 
+// Formats of the built-in converters.
+const (
+	Text     Format = "txt"
+	Markdown Format = "md"
+	JSON     Format = "json"
+	HTML     Format = "html"
+	CSV      Format = "csv"
+	DOCX     Format = "docx"
+	PPTX     Format = "pptx"
+	XLSX     Format = "xlsx"
+	PDF      Format = "pdf"
+)
+
 func ParseFormat(s string) Format          // accepts "PDF", ".pdf", "markdown"
 func FormatOf(filename string) (Format, bool)
 
@@ -290,6 +303,9 @@ type Limits struct {
 	MaxOutputBytes   int64 // Markdown bytes produced; default 64 MiB
 }
 
+// Effective returns the limits with defaults applied; -1 means unlimited.
+func (l Limits) Effective() Limits
+
 var (
 	ErrUnsupported = errors.New("mdchunk/convert: unsupported format")
 	ErrEncrypted   = errors.New("mdchunk/convert: encrypted document")
@@ -349,10 +365,10 @@ otherwise invalid bytes become U+FFFD.
 
 ### Built-in converters
 
-- `convert/text`: `text.Markdown(opts)` and `text.Plain(opts)` emit the decoded
-  text; plain text is read as Markdown by the splitter, as most plain text is.
-  `text.JSON(opts)` wraps the decoded text in a `json` fence longer than any
-  backtick run it contains.
+- `convert/text`: `text.New(opts)` for plain text and Markdown emits the
+  decoded text; plain text is read as Markdown by the splitter, as most plain
+  text is. `text.JSON(opts)` wraps the decoded text in a `json` fence longer
+  than any backtick run it contains.
 - `convert/html`: `html.New(opts)`. CommonMark with GFM tables; spanned cells
   repeated; a table without header cells promotes its first row; relative links
   resolved against `Input.BaseURL`.
