@@ -119,7 +119,7 @@ func (s *Splitter) Split(text string) []Chunk {
 	for start := 0; ; {
 		// Leading whitespace before a heading joins the heading's chunk.
 		hard := l.nextHardStart(start)
-		for hard < len(text) && lastContentEnd(text, start, hard) == start {
+		for hard < len(text) && l.contentEndBefore(hard) <= start {
 			hard = l.nextHardStart(hard)
 		}
 		end := hard

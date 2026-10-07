@@ -579,6 +579,15 @@ func BenchmarkSplitLongWhitespace(b *testing.B) {
 	}
 }
 
+func BenchmarkSplitWhitespaceBeforeHeading(b *testing.B) {
+	text := strings.Repeat(" ", 512<<10) + "\n# H\nx"
+	s := mustNew(b, Options{Size: 500})
+	b.SetBytes(int64(len(text)))
+	for b.Loop() {
+		s.Split(text)
+	}
+}
+
 func BenchmarkSplitUnmatchedBackticks(b *testing.B) {
 	var text strings.Builder
 	text.WriteString("start ")
