@@ -59,15 +59,16 @@ func (w *Writer) Fence(info, content string) {
 			run = 0
 		}
 	}
-	fence := strings.Repeat("`", max(3, longest+1))
+	fenceLen := max(3, longest+1)
 	newline := ""
 	if !strings.HasSuffix(content, "\n") {
 		newline = "\n"
 	}
-	if w.err == nil && w.max >= 0 && int64(w.b.Len()+2*len(fence)+len(info)+1+len(content)+len(newline)) > w.max {
+	if w.err == nil && w.max >= 0 && int64(w.b.Len()+2*fenceLen+len(info)+1+len(content)+len(newline)) > w.max {
 		w.err = &convert.LimitError{Limit: convert.LimitOutput, Max: w.max}
 		return
 	}
+	fence := strings.Repeat("`", fenceLen)
 	w.WriteString(fence + info + "\n")
 	w.WriteString(content)
 	w.WriteString(newline + fence)

@@ -101,6 +101,16 @@ func TestRegistry(t *testing.T) {
 	}
 }
 
+func TestRegisterNilPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("Register(nil) did not panic")
+		}
+	}()
+	var r convert.Registry
+	r.Register(nil, convert.Text)
+}
+
 func TestRegistryConcurrent(t *testing.T) {
 	var r convert.Registry
 	var wg sync.WaitGroup

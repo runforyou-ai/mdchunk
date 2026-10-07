@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"strings"
 	"testing"
 
@@ -52,9 +53,11 @@ func TestReadAtLimitAndUnlimited(t *testing.T) {
 	if err != nil || len(data) != r.size {
 		t.Fatalf("at limit: %d bytes, %v", len(data), err)
 	}
-	r = &countingReader{size: 3 * chunkSize}
-	if data, err := Read(context.Background(), convert.Input{Reader: r}, -1); err != nil || len(data) != r.size {
-		t.Fatalf("unlimited: %d bytes, %v", len(data), err)
+	for _, max := range []int64{-1, math.MaxInt64} {
+		r = &countingReader{size: 3 * chunkSize}
+		if data, err := Read(context.Background(), convert.Input{Reader: r}, max); err != nil || len(data) != r.size {
+			t.Fatalf("max %d: %d bytes, %v", max, len(data), err)
+		}
 	}
 }
 
@@ -67,6 +70,10 @@ func TestReadErrors(t *testing.T) {
 	r = &countingReader{size: 3 * chunkSize, cancel: cancel}
 	if _, err := Read(ctx, convert.Input{Reader: r}, -1); !errors.Is(err, context.Canceled) || r.read != chunkSize {
 		t.Errorf("cancel between reads: %v after %d bytes", err, r.read)
+	}
+	r = &countingReader{size: 10, failAfter: 10}
+	if _, err := Read(context.Background(), convert.Input{Reader: r}, -1); !errors.Is(err, io.ErrUnexpectedEOF) || !strings.HasPrefix(err.Error(), "mdchunk/convert: read: ") {
+		t.Errorf("unnamed reader error: %v", err)
 	}
 	if _, err := Read(context.Background(), convert.Input{}, -1); err == nil {
 		t.Error("nil reader accepted")

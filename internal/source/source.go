@@ -26,10 +26,11 @@ func Read(ctx context.Context, in convert.Input, maxBytes int64) ([]byte, error)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// Read at most one byte past the limit; len(data) <= maxBytes holds here.
 		next := buf
 		if maxBytes >= 0 {
-			if remaining := maxBytes + 1 - int64(len(data)); remaining < int64(len(next)) {
-				next = next[:remaining]
+			if remaining := maxBytes - int64(len(data)); remaining < int64(len(next))-1 {
+				next = next[:remaining+1]
 			}
 		}
 		n, err := in.Reader.Read(next)
