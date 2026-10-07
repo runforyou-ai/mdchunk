@@ -198,6 +198,11 @@ func (s *Splitter) cut(l *layout, start, hard, prevEnd int) int {
 	if wider, _ := pick(lo, l.lastPositionAt(base+s.maxSize), rankSpace, false); wider >= 0 {
 		return wider
 	}
+	// Keep a heading whole when it fits but its body's first line does not.
+	window = l.lastPositionAt(base + s.maxSize)
+	if i := sort.SearchInts(l.headingEnds, window+1) - 1; i >= 0 && l.headingEnds[i] > max(start, prevEnd) && usable(l.headingEnds[i]) {
+		return l.headingEnds[i]
+	}
 	// Otherwise cut at the last line boundary before the minimum.
 	for i := lo - 1; i > max(start, prevEnd); i-- {
 		if l.ranks[i] >= rankLine && usable(i) {

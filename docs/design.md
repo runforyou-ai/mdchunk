@@ -156,7 +156,8 @@ Within the contract, in priority order:
    block > line break > sentence end > clause > whitespace > enclosed position >
    any code point. Beyond `Size` only block boundaries count at first; when
    that leaves only enclosed or no boundaries, a line break, sentence end,
-   clause or whitespace up to `MaxSize` keeps a line or heading whole. Pieces
+   clause or whitespace up to `MaxSize` keeps a line or heading whole; failing
+   that, a heading that fits ends the chunk without its body's first line. Pieces
    are at least `max(Overlap+1, Size/2)` long when the text allows, avoiding
    fragments.
 4. Start the next chunk at the highest-ranked, earliest boundary inside the
@@ -194,7 +195,7 @@ at most three spaces of indentation. Each line is classified in this order:
    the whole paragraph becomes a level 1 or 2 heading.
 7. Thematic break (`***`, `---`, `___` with optional spaces).
 8. List item (`-`, `*`, `+` or `1.`/`1)` followed by a space). Inside a
-   paragraph only an item with content, and for ordered lists starting at 1,
+   paragraph only an item with content, and for ordered lists numbered 1,
    opens a list; otherwise the line continues the paragraph. Indented lines
    after an item belong to it.
 9. ATX heading (`#`–`######` followed by space, tab or end of line).

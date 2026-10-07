@@ -3,6 +3,7 @@ package split
 import (
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -82,6 +83,9 @@ type layout struct {
 	tables     []tableBlock
 	hardStarts []int // starts of headings that are not attached, ascending
 	blocks     []int // positions ranked rankBlock, ascending
+	// headingEnds are the line starts right after heading blocks, ascending; they are cut only
+	// when a heading's body does not fit.
+	headingEnds []int
 
 	contentEnds map[int]int // cache for contentEndBefore
 }
@@ -410,6 +414,9 @@ func (l *layout) rankLines(lines []line) {
 		if !headingLine[i] {
 			continue
 		}
+		if i+1 < len(lines) && !headingLine[i+1] {
+			l.headingEnds = append(l.headingEnds, lines[i+1].start)
+		}
 		for j := i + 1; j < len(lines); j++ {
 			l.ranks[lines[j].start] = rankNone
 			if lines[j].kind != kindBlank {
@@ -645,7 +652,11 @@ func interruptsParagraph(rest string) bool {
 	if marker < 0 || isBlank(rest[marker:]) {
 		return false
 	}
-	return strings.ContainsRune("-*+", rune(rest[0])) || rest[:marker-1] == "1"
+	if strings.ContainsRune("-*+", rune(rest[0])) {
+		return true
+	}
+	number, err := strconv.Atoi(rest[:marker-1])
+	return err == nil && number == 1
 }
 
 // htmlStart returns the end condition of an HTML block starting at rest.

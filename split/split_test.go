@@ -3,6 +3,7 @@ package split
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,20 +215,20 @@ func TestLongHeadingIsCutInside(t *testing.T) {
 	s := mustNew(t, Options{Size: 60, Overlap: 5})
 	chunks := s.Split(text)
 	checkContract(t, s, text, chunks)
+	headingEnd := strings.Index(text, long) + len(long)
 	sawContinuation, sawBody := false, false
 	for _, c := range chunks[1:] {
 		got := strings.Join(headingTexts(c), "|")
-		switch {
-		case strings.HasPrefix(c.Text, "标题") || strings.HasPrefix(c.Text, "## "):
+		if c.Start < headingEnd {
 			sawContinuation = true
 			if got != "Root" {
-				t.Errorf("heading chunk %q inherits %q, want Root", c.Text[:12], got)
+				t.Errorf("heading chunk at %d inherits %q, want Root", c.Start, got)
 			}
-		case strings.Contains(c.Text, "正文"):
-			sawBody = true
-			if got != "Root|"+long {
-				t.Errorf("body chunk inherits %q", got)
-			}
+			continue
+		}
+		sawBody = true
+		if got != "Root|"+long {
+			t.Errorf("body chunk at %d inherits %q", c.Start, got)
 		}
 	}
 	if !sawContinuation || !sawBody {
@@ -351,6 +352,7 @@ func TestHeadingsAreRecognised(t *testing.T) {
 		"setext dash":    {"Title\n-\n\nbody\n", []string{"Title"}},
 		"break not list": {"* * *\n\n  # Real\n", []string{"Real"}},
 		"empty item":     {"Foo\n*\n\n# H\n", []string{"H"}},
+		"leading zeros":  {"Foo\n01. item\n  # nested\n", nil},
 		"bom":            {"\uFEFF# H\n", []string{"H"}},
 	} {
 		var got []string
@@ -388,6 +390,12 @@ func TestStructuresFittingMaxSizeStayWhole(t *testing.T) {
 	if chunks[0].Text != "# abcdefghijklmnopqrs\nx\n" {
 		t.Errorf("heading chunk = %q", chunks[0].Text)
 	}
+	long := "# " + strings.Repeat("h", 19) + "\n" + strings.Repeat("y", 60)
+	chunks = s.Split(long)
+	checkContract(t, s, long, chunks)
+	if chunks[0].Text != "# "+strings.Repeat("h", 19)+"\n" {
+		t.Errorf("heading with a long body = %q", chunks[0].Text)
+	}
 	code := "```\n" + strings.Repeat("c", 21) + "\n" + strings.Repeat("d", 21) + "\n```\n"
 	chunks = s.Split(code)
 	checkContract(t, s, code, chunks)
@@ -422,6 +430,26 @@ func TestMaxSizeEqualsSize(t *testing.T) {
 	for _, c := range chunks {
 		if c.Length > 30 {
 			t.Errorf("chunk length %d", c.Length)
+		}
+	}
+}
+
+func TestCodeSpans(t *testing.T) {
+	for _, tc := range []struct {
+		line  string
+		spans [][2]int
+	}{
+		{"no code", nil},
+		{"`a` b", [][2]int{{0, 3}}},
+		{"``a`b`` c", [][2]int{{0, 7}}},
+		{"`` unclosed `x`", [][2]int{{12, 15}}},
+		{"`a ``b`` c` d", [][2]int{{0, 11}}},
+		{"``` `a` ``` ``b``", [][2]int{{0, 11}, {12, 17}}},
+		{"` `` `` `", [][2]int{{0, 9}}},
+		{"```", nil},
+	} {
+		if got := codeSpans(tc.line); fmt.Sprint(got) != fmt.Sprint(tc.spans) {
+			t.Errorf("codeSpans(%q) = %v, want %v", tc.line, got, tc.spans)
 		}
 	}
 }
