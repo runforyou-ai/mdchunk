@@ -1,6 +1,7 @@
 package html
 
 import (
+	"errors"
 	"strings"
 	"unicode"
 
@@ -17,8 +18,17 @@ const (
 )
 
 // cellOverhead is the least Markdown a table cell renders to besides its
-// content ("|  " and a space).
+// content: a space, the content, a space and a pipe.
 const cellOverhead = 3
+
+// nodeBytes is what copying one node is assumed to cost against the expansion limit.
+const nodeBytes = 64
+
+// silent are elements whose text the converter drops.
+var silent = map[atom.Atom]bool{atom.Script: true, atom.Style: true, atom.Template: true, atom.Noscript: true}
+
+// shownAttributes are attributes whose values appear in the Markdown.
+var shownAttributes = map[string]bool{"href": true, "src": true, "alt": true, "title": true}
 
 // inlineCode are the elements the converter renders as inline code.
 var inlineCode = map[atom.Atom]bool{atom.Code: true, atom.Var: true, atom.Samp: true, atom.Kbd: true, atom.Tt: true}
@@ -26,9 +36,11 @@ var inlineCode = map[atom.Atom]bool{atom.Code: true, atom.Var: true, atom.Samp: 
 // prepareTables expands every table, innermost first, into a rectangular grid
 // without spans and escapes pipes inside inline code in cells. Before a table
 // is expanded, a lower bound of its rendered size is checked against what is
-// left of maxOutput; a table that cannot fit returns a *convert.LimitError.
-func prepareTables(doc *xhtml.Node, maxOutput int64) error {
-	budget := maxOutput
+// left of limits.MaxOutputBytes, and the copies it makes against what is left
+// of limits.MaxExpandedBytes; a table that cannot fit returns a
+// *convert.LimitError.
+func prepareTables(doc *xhtml.Node, limits convert.Limits) error {
+	output, expanded := limits.MaxOutputBytes, limits.MaxExpandedBytes
 	var tables []*xhtml.Node
 	var walk func(*xhtml.Node)
 	walk = func(n *xhtml.Node) {
@@ -41,16 +53,28 @@ func prepareTables(doc *xhtml.Node, maxOutput int64) error {
 	}
 	walk(doc)
 	for _, table := range tables {
-		cost, ok := expandTable(table, budget)
-		if !ok {
-			return &convert.LimitError{Limit: convert.LimitOutput, Max: maxOutput}
+		size, copies, err := expandTable(table, output, expanded)
+		switch {
+		case errors.Is(err, errOutput):
+			return &convert.LimitError{Limit: convert.LimitOutput, Max: limits.MaxOutputBytes}
+		case errors.Is(err, errExpanded):
+			return &convert.LimitError{Limit: convert.LimitExpanded, Max: limits.MaxExpandedBytes}
 		}
-		if budget >= 0 {
-			budget -= cost
+		if output >= 0 {
+			output -= size
+		}
+		if expanded >= 0 {
+			expanded -= copies
 		}
 	}
 	return nil
 }
+
+// Budget errors of expandTable.
+var (
+	errOutput   = errors.New("table output exceeds the budget")
+	errExpanded = errors.New("table copies exceed the budget")
+)
 
 // row is a table row and the index of the last row in its row group.
 type row struct {
@@ -59,24 +83,29 @@ type row struct {
 }
 
 // expandTable rewrites the rows of table so each holds one cell per column,
-// repeating spanned cells. It returns the lower bound of the table's rendered
-// size, or false when that exceeds budget (budget < 0 means unlimited); then
-// the table is left unchanged.
-func expandTable(table *xhtml.Node, budget int64) (int64, bool) {
+// repeating spanned cells. It returns a lower bound of the table's rendered
+// size and the bytes its copies are assumed to take. When either exceeds its
+// budget (negative means unlimited) it returns errOutput or errExpanded and
+// leaves the table unchanged.
+func expandTable(table *xhtml.Node, output, expanded int64) (int64, int64, error) {
 	rows := tableRows(table)
 	if len(rows) == 0 {
-		return 0, true
+		return 0, 0, nil
 	}
 	// Bound the grid and its content before allocating: active widths per row
 	// come from a difference array over the rows each cell spans.
 	widths := make([]int64, len(rows)+1)
-	var content int64
+	var content, copies, area int64
 	for i, r := range rows {
 		for _, cell := range rowCells(r.node) {
 			colspan, rowspan := spans(cell, r.groupEnd-i+1)
 			widths[i] += int64(colspan)
 			widths[i+rowspan] -= int64(colspan)
-			content += cellCost(cell) * int64(colspan) * int64(rowspan)
+			text, nodes := measureCell(cell)
+			slots := int64(colspan) * int64(rowspan)
+			content += text * slots
+			copies += nodes * nodeBytes * (slots - 1)
+			area += slots
 		}
 	}
 	var width, active int64
@@ -84,9 +113,13 @@ func expandTable(table *xhtml.Node, budget int64) (int64, bool) {
 		active += widths[i]
 		width = max(width, active)
 	}
-	cost := content + int64(len(rows))*width*cellOverhead
-	if budget >= 0 && cost > budget {
-		return 0, false
+	size := content + int64(len(rows))*width*cellOverhead
+	copies += max(int64(len(rows))*width-area, 0) * nodeBytes // padding cells
+	if output >= 0 && size > output {
+		return 0, 0, errOutput
+	}
+	if expanded >= 0 && copies > expanded {
+		return 0, 0, errExpanded
 	}
 
 	grid := make([][]*xhtml.Node, len(rows))
@@ -112,47 +145,64 @@ func expandTable(table *xhtml.Node, budget int64) (int64, bool) {
 	for i := range grid {
 		gridWidth = max(gridWidth, len(grid[i]))
 	}
-	for i, r := range rows {
+	for _, r := range rows {
 		for _, cell := range rowCells(r.node) {
 			r.node.RemoveChild(cell)
 		}
+	}
+	// Each cell is prepared once; its first slot reuses it and further slots hold copies.
+	placed := map[*xhtml.Node]bool{}
+	for i, r := range rows {
 		for c := range gridWidth {
 			var cell *xhtml.Node
-			if c < len(grid[i]) && grid[i][c] != nil {
-				cell = clone(grid[i][c])
-				cell.Attr = withoutSpans(cell.Attr)
-			} else {
+			switch {
+			case c >= len(grid[i]) || grid[i][c] == nil:
 				cell = &xhtml.Node{Type: xhtml.ElementNode, Data: "td", DataAtom: atom.Td}
+			case placed[grid[i][c]]:
+				cell = clone(grid[i][c])
+			default:
+				cell = grid[i][c]
+				cell.Attr = withoutSpans(cell.Attr)
+				escapeCodePipes(cell)
+				placed[cell] = true
 			}
-			escapeCodePipes(cell)
 			r.node.AppendChild(cell)
 		}
 	}
-	return cost, true
+	return size, copies, nil
 }
 
-// cellCost is a lower bound of the Markdown a cell renders to: its
-// non-whitespace text, one byte per element and the cell overhead.
-func cellCost(cell *xhtml.Node) int64 {
-	var cost int64 = cellOverhead
-	var walk func(*xhtml.Node)
-	walk = func(n *xhtml.Node) {
+// measureCell returns a lower bound of the Markdown a cell's content renders
+// to (its non-whitespace text outside script and style, and the values of
+// link and image attributes) and the number of nodes copying it makes.
+func measureCell(cell *xhtml.Node) (int64, int64) {
+	var text, nodes int64
+	var walk func(n *xhtml.Node, quiet bool)
+	walk = func(n *xhtml.Node, quiet bool) {
+		nodes++
 		switch n.Type {
 		case xhtml.TextNode:
-			for _, r := range n.Data {
-				if !unicode.IsSpace(r) {
-					cost++
+			if !quiet {
+				for _, r := range n.Data {
+					if !unicode.IsSpace(r) {
+						text++
+					}
 				}
 			}
 		case xhtml.ElementNode:
-			cost++
+			quiet = quiet || silent[n.DataAtom]
+			for _, attr := range n.Attr {
+				if shownAttributes[attr.Key] && !quiet {
+					text += int64(len(strings.TrimSpace(attr.Val)))
+				}
+			}
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
+			walk(child, quiet)
 		}
 	}
-	walk(cell)
-	return cost
+	walk(cell, false)
+	return text, nodes
 }
 
 // tableRows returns the rows of table with their row group ends, including
@@ -230,7 +280,7 @@ func spans(cell *xhtml.Node, remaining int) (int, int) {
 // spanValue parses the leading digits of a span attribute as browsers do,
 // saturating long numbers.
 func spanValue(value string) (int, bool) {
-	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.TrimSpace(value), "+")
 	n, digits := 0, 0
 	for digits < len(value) && value[digits] >= '0' && value[digits] <= '9' {
 		if n < maxRowspan {

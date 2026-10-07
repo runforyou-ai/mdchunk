@@ -374,16 +374,20 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   than any backtick run it contains.
 - `convert/html`: `html.New(opts)`. CommonMark with GFM tables. Before
   conversion every table, innermost first, is expanded to a rectangular grid:
-  spans, clamped to the HTML standard's 1000 columns and 65534 rows and kept
-  within their row group, repeat their cell; short rows are padded; pipes in
-  inline code (`code`, `var`, `samp`, `kbd`, `tt`) inside cells are escaped.
-  Before a table is expanded, a lower bound of its rendered size (each copy of
-  a cell counts its non-whitespace text, one byte per element and three bytes
-  of table syntax) must fit what is left of the output limit, or the
-  conversion fails with an output `LimitError`. A table without header cells
-  promotes its first row; relative links resolve against `Input.BaseURL`. The
-  underlying library builds the whole output and ignores the context, so the
-  output limit and cancellation are checked again once it returns.
+  spans, clamped to the HTML standard's 1000 columns and 65534 rows (a leading
+  `+` and overlong numbers parse as browsers do) and kept within their row
+  group, repeat their cell; short rows are padded; pipes in inline code
+  (`code`, `var`, `samp`, `kbd`, `tt`) inside cells are escaped. Before a table
+  is expanded, a lower bound of its rendered size (visible text, link and
+  image attributes, and three bytes of syntax per grid cell) must fit what is
+  left of the output limit, and the copies (64 bytes per copied node) must fit
+  what is left of `MaxExpandedBytes`; otherwise the conversion fails with the
+  corresponding `LimitError`. A table without header cells promotes its first
+  row; relative links resolve against `Input.BaseURL`. A table whose cells
+  contain another table is rendered as text around the inner table, as the
+  underlying library does. That library builds the whole output and ignores
+  the context, so the output limit and cancellation are checked again once it
+  returns.
 - `convert/csv`: `csv.New(opts)` with `Comma`, `NoHeader` and `LazyQuotes`.
   One table; the first row is the header. With `NoHeader` every row is a body
   row under an empty header row of the same width, so the output stays a GFM

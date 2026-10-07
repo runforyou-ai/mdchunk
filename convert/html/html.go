@@ -77,7 +77,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
-	if err := prepareTables(doc, limits.MaxOutputBytes); err != nil {
+	if err := prepareTables(doc, limits); err != nil {
 		return convert.Document{}, err
 	}
 	options := []converter.ConvertOptionFunc{converter.WithContext(ctx)}

@@ -77,6 +77,7 @@ func TestTables(t *testing.T) {
 			"| k | v |\n|---|---|\n| a | 1 |\n| a | 2 |\n| b | 3 |\n| c | 3 |"},
 		"ragged rows": {`<table><tr><th>x</th></tr><tr><td>1</td><td>2</td></tr></table>`,
 			"| x |  |\n|---|---|\n| 1 | 2 |"},
+		"plus sign": {`<table><tr><th>a</th><th>b</th><th>c</th></tr><tr><td colspan="+2">x</td><td>y</td></tr></table>`, "| x | x | y |"},
 		"nested adjacent colspans": {`<table><tr><th>outer</th></tr><tr><td><table><tr><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th></tr>
 <tr><td colspan="3">A</td><td colspan="2">B</td><td>C</td></tr></table></td></tr></table>`, "| A | A | A | B | B | C |"},
 		"row groups": {`<table><thead><tr><th>k</th><th>v</th></tr></thead><tbody><tr><td rowspan="0">A</td><td>1</td></tr></tbody>
@@ -115,8 +116,37 @@ func TestHugeSpans(t *testing.T) {
 	if !errors.As(err, &limit) {
 		t.Errorf("sparse rows: %v", err)
 	}
+	href := `<table><tr><td colspan=1000><a href="https://e.com/` + strings.Repeat("p", 8000) + `">l</a></td></tr></table>`
+	_, err = html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 65536}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(href)})
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput {
+		t.Errorf("long link: %v", err)
+	}
+	nodes := `<table><tr><td colspan=1000>` + strings.Repeat("<i></i>", 200) + `x</td></tr></table>`
+	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(nodes)})
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
+		t.Errorf("copied nodes: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("huge spans took %v", elapsed)
+	}
+}
+
+func TestOutputLimitIsExact(t *testing.T) {
+	src := `<table><tr><td>a</td><td>b</td><td>c</td><td>d</td></tr><tr><td>e</td><td>f</td><td>g</td><td>h</td></tr></table>`
+	at := int64(len(run(t, convert.Input{Reader: strings.NewReader(src)})))
+	if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); err != nil {
+		t.Errorf("at the limit: %v", err)
+	}
+	if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at - 1}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); !errors.Is(err, convert.ErrTooLarge) {
+		t.Errorf("one byte over: %v", err)
+	}
+}
+
+func TestNestedTableOuterBecomesText(t *testing.T) {
+	src := `<table><tr><th>o1</th><th>o2</th></tr><tr><td><table><tr><th>i1</th><th>i2</th></tr><tr><td>1</td><td>2</td></tr></table></td><td>z</td></tr></table>`
+	got := run(t, convert.Input{Reader: strings.NewReader(src)})
+	if !strings.Contains(got, "| i1 | i2 |") || strings.Contains(got, "| o1 |") {
+		t.Errorf("got:\n%s", got)
 	}
 }
 
