@@ -3,10 +3,13 @@ package html_test
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/unicode"
 
 	"github.com/runforyou-ai/mdchunk/convert"
 	"github.com/runforyou-ai/mdchunk/convert/html"
@@ -23,6 +26,16 @@ func run(t *testing.T, in convert.Input) string {
 		t.Errorf("Sections = %v", doc.Sections)
 	}
 	return doc.Markdown
+}
+
+// utf16 encodes s as UTF-16LE with a BOM.
+func utf16(t *testing.T, s string) string {
+	t.Helper()
+	b, err := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewEncoder().String(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // gbk returns "<p>中文</p>" encoded as GB18030.
@@ -53,13 +66,40 @@ func TestStructure(t *testing.T) {
 }
 
 func TestTables(t *testing.T) {
-	got := run(t, convert.Input{Reader: strings.NewReader(`<table>
-<tr><td>地区</td><td>运费</td></tr>
-<tr><td colspan="2">合并</td></tr>
-</table>`)})
-	want := "| 地区 | 运费 |\n|---|---|\n| 合并 | 合并 |"
-	if !strings.Contains(got, want) {
-		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	for name, tc := range map[string]struct{ src, want string }{
+		"promoted header": {`<table><tr><td>地区</td><td>运费</td></tr><tr><td colspan="2">合并</td></tr></table>`,
+			"| 地区 | 运费 |\n|---|---|\n| 合并 | 合并 |"},
+		"adjacent colspans": {`<table><tr><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th></tr>
+<tr><td colspan="3">A</td><td colspan="2">B</td><td>C</td></tr></table>`,
+			"| 1 | 2 | 3 | 4 | 5 | 6 |\n|---|---|---|---|---|---|\n| A | A | A | B | B | C |"},
+		"rowspan": {`<table><thead><tr><th>k</th><th>v</th></tr></thead><tbody>
+<tr><td rowspan="2">a</td><td>1</td></tr><tr><td>2</td></tr><tr><td>b</td><td rowspan="0">3</td></tr><tr><td>c</td></tr></tbody></table>`,
+			"| k | v |\n|---|---|\n| a | 1 |\n| a | 2 |\n| b | 3 |\n| c | 3 |"},
+		"ragged rows": {`<table><tr><th>x</th></tr><tr><td>1</td><td>2</td></tr></table>`,
+			"| x |  |\n|---|---|\n| 1 | 2 |"},
+		"code pipe": {`<table><tr><th>c</th><th>d</th></tr><tr><td><code>a|b</code></td><td>x</td></tr></table>`,
+			"| c | d |\n|---|---|\n| `a\\|b` | x |"},
+	} {
+		if got := run(t, convert.Input{Reader: strings.NewReader(tc.src)}); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: got:\n%s\nwant:\n%s", name, got, tc.want)
+		}
+	}
+}
+
+func TestHugeSpans(t *testing.T) {
+	start := time.Now()
+	src := `<table><tr><td colspan=100000000 rowspan=100000000>x</td></tr></table>`
+	if got := run(t, convert.Input{Reader: strings.NewReader(src)}); strings.Count(got, "x") != 1000 {
+		t.Errorf("colspan not clamped to 1000: %d cells", strings.Count(got, "x"))
+	}
+	_, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 1000}}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=1000>x</td></tr>` + strings.Repeat("<tr><td>y</td></tr>", 100) + `</table>`)})
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != 1000 {
+		t.Errorf("cell budget: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("huge spans took %v", elapsed)
 	}
 }
 
@@ -72,6 +112,8 @@ func TestCharset(t *testing.T) {
 		"charset wins":   {Reader: strings.NewReader(`<meta charset="utf-8">` + gbk(t)), Charset: "gbk"},
 		"meta in body":   {Reader: strings.NewReader("<body>" + body + `<meta charset="gbk"></body>`)},
 		"utf-8 with bom": {Reader: strings.NewReader("\xEF\xBB\xBF" + body)},
+		"utf-16 bom":     {Reader: strings.NewReader(utf16(t, body))},
+		"unknown input":  {Reader: strings.NewReader(`<meta charset="gbk">` + gbk(t)), Charset: "bogus"},
 	} {
 		if got := run(t, in); got != "中文" {
 			t.Errorf("%s: got %q", name, got)
@@ -103,12 +145,31 @@ func TestEmptyAndLimits(t *testing.T) {
 	}
 }
 
+// cancelOnEOF cancels a context when its reader is drained.
+type cancelOnEOF struct {
+	r      io.Reader
+	cancel func()
+}
+
+func (c cancelOnEOF) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		c.cancel()
+	}
+	return n, err
+}
+
 func TestCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := html.New(html.Options{}).Convert(ctx, convert.Input{Reader: strings.NewReader("<p>x</p>")})
 	if !errors.Is(err, context.Canceled) {
-		t.Errorf("got %v", err)
+		t.Errorf("before reading: %v", err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	doc, err := html.New(html.Options{}).Convert(ctx, convert.Input{Reader: cancelOnEOF{strings.NewReader("<p>x</p>"), cancel}})
+	if !errors.Is(err, context.Canceled) || doc.Markdown != "" {
+		t.Errorf("during conversion: %q, %v", doc.Markdown, err)
 	}
 }
 

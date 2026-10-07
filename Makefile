@@ -4,7 +4,7 @@ test:
 	go test -race -count=1 ./...
 
 fuzz:
-	go test ./split -run '^$$' -fuzz FuzzSplit -fuzztime 60s
+	./scripts/fuzz.sh 60s
 
 lint:
 	go vet ./...

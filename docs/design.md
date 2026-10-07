@@ -341,7 +341,8 @@ type LimitError struct {
   XLSX, PDF) is `ErrCorrupt`. A valid PDF without a text layer yields empty
   Markdown and one empty page section per page.
 - Sources are read up to `MaxBytes+1` to detect `MaxBytes` overflow. Output is
-  limited while it is built, not after.
+  limited while it is built, not after; where a third-party library builds the
+  output, the input to it is bounded first (see `convert/html`).
 - Cancellation is checked between reads, while waiting for a worker, and per
   page, slide, sheet, row or block. A blocked `Read` or a single third-party
   call is not interrupted.
@@ -371,10 +372,15 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   decoded text; plain text is read as Markdown by the splitter, as most plain
   text is. `text.JSON(opts)` wraps the decoded text in a `json` fence longer
   than any backtick run it contains.
-- `convert/html`: `html.New(opts)`. CommonMark with GFM tables; spanned cells
-  repeated; a table without header cells promotes its first row; relative links
-  resolved against `Input.BaseURL`. The underlying library builds the whole
-  output, so the output limit is checked once conversion finishes.
+- `convert/html`: `html.New(opts)`. CommonMark with GFM tables. Before
+  conversion every table is expanded to a rectangular grid: spans, clamped to
+  the HTML standard's 1000 columns and 65534 rows, repeat their cell; short rows
+  are padded; pipes in code inside cells are escaped. The expanded cells must
+  fit the output limit at three bytes each, or the conversion fails with an
+  output `LimitError` before any expansion. A table without header cells
+  promotes its first row; relative links resolve against `Input.BaseURL`. The
+  underlying library builds the whole output and ignores the context, so the
+  output limit and cancellation are checked again once it returns.
 - `convert/csv`: `csv.New(opts)` with `Comma`, `NoHeader` and `LazyQuotes`.
   One table; the first row is the header. With `NoHeader` every row is a body
   row under an empty header row of the same width, so the output stays a GFM

@@ -1,9 +1,12 @@
 // Package html converts HTML to CommonMark with GFM tables.
 //
-// The encoding comes from a BOM, then Input.Charset, then the first <meta>
-// charset declaration before <body>, then UTF-8 or Options.Fallback. Spanned
-// table cells are repeated, a table without header cells promotes its first
-// row, and relative links resolve against Input.BaseURL.
+// The encoding comes from a BOM, then Input.Charset when it names a known
+// encoding, then the first <meta> charset declaration before <body>, then
+// UTF-8 or Options.Fallback. Tables are expanded to rectangular grids before
+// conversion: spans (clamped to the HTML standard's limits) repeat their cell,
+// short rows are padded, and the expansion is bounded by the output limit. A
+// table without header cells promotes its first row, and relative links
+// resolve against Input.BaseURL.
 package html
 
 import (
@@ -62,24 +65,33 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		return convert.Document{}, err
 	}
 	declared := in.Charset
-	if declared == "" {
+	if textdecode.Lookup(declared) == nil {
 		declared = metaCharset(data)
 	}
 	text := textdecode.Decode(data, declared, c.opts.Fallback)
 	if strings.TrimSpace(text) == "" {
 		return convert.Document{}, nil
 	}
+	doc, err := xhtml.Parse(strings.NewReader(text))
+	if err != nil {
+		return convert.Document{}, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
+	}
+	if err := prepareTables(doc, limits.MaxOutputBytes); err != nil {
+		return convert.Document{}, err
+	}
 	options := []converter.ConvertOptionFunc{converter.WithContext(ctx)}
 	if in.BaseURL != "" {
 		options = append(options, converter.WithDomain(in.BaseURL))
 	}
-	markdown, err := c.converter.ConvertString(text, options...)
+	output, err := c.converter.ConvertNode(doc, options...)
+	// The library does not observe ctx, so cancellation is checked once it returns.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return convert.Document{}, ctxErr
+	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return convert.Document{}, ctx.Err()
-		}
 		return convert.Document{}, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
+	markdown := string(output)
 	w := mdwrite.New(limits.MaxOutputBytes)
 	w.WriteString(textdecode.Normalize(markdown))
 	if err := w.Err(); err != nil {
