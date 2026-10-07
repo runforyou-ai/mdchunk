@@ -41,10 +41,11 @@ func Decode(data []byte, declared string, fallback encoding.Encoding) string {
 	return strings.ToValidUTF8(string(data), "\uFFFD")
 }
 
-// Lookup returns the encoding a charset label names, or nil when the label is
-// empty, unknown or maps to the replacement encoding.
+// Lookup returns the encoding a charset label names, ignoring surrounding
+// quotes, or nil when the label is empty, unknown or maps to the replacement
+// encoding.
 func Lookup(label string) encoding.Encoding {
-	label = strings.TrimSpace(label)
+	label = strings.Trim(strings.TrimSpace(label), `"'`)
 	if label == "" {
 		return nil
 	}

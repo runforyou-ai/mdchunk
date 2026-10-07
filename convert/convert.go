@@ -142,7 +142,7 @@ type Registry struct {
 	converters map[Format]Converter
 }
 
-// Register makes c the converter for formats. It panics if c is nil.
+// Register makes c the converter for formats. It panics if c is a nil interface.
 func (r *Registry) Register(c Converter, formats ...Format) {
 	if c == nil {
 		panic("mdchunk/convert: Register with a nil Converter")

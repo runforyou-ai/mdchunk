@@ -50,6 +50,9 @@ func (w *Writer) String() string {
 // Fence writes content in a code fence longer than any backtick run it contains.
 // The limit is checked before anything is written.
 func (w *Writer) Fence(info, content string) {
+	if w.err != nil {
+		return
+	}
 	longest, run := 0, 0
 	for i := 0; i < len(content); i++ {
 		if content[i] == '`' {

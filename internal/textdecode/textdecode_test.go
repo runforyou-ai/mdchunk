@@ -20,6 +20,7 @@ func TestDecode(t *testing.T) {
 		"declared utf-8 keeps text":       {[]byte("中文\xff"), "utf-8", true, "中文\uFFFD"},
 		"replacement label is unknown":    {[]byte("plain ASCII"), "iso-2022-kr", false, "plain ASCII"},
 		"replacement label uses fallback": {gb, "hz-gb-2312", true, "中文"},
+		"quoted label":                    {gb, `"gbk"`, false, "中文"},
 		"blank label":                     {gb, "  ", true, "中文"},
 		"utf-32 le":                       {le32, "", false, "中文😀"},
 		"utf-32 be":                       {be32, "", false, "中文😀"},
