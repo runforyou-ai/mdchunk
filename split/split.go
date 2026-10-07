@@ -107,7 +107,7 @@ func (c Chunk) TextWithContext() string {
 }
 
 // Split splits text into chunks. Whitespace-only text yields nil.
-// It panics if text is 2 GiB or longer.
+// It panics if text is longer than math.MaxInt32 bytes.
 func (s *Splitter) Split(text string) []Chunk {
 	if strings.TrimFunc(text, unicode.IsSpace) == "" {
 		return nil
@@ -145,6 +145,19 @@ func (s *Splitter) cut(l *layout, start, hard, prevEnd int) int {
 	minimum := max(s.overlap+1, s.size/2)
 	slack := s.maxSize - s.size
 	contentEnd := lastContentEnd(l.text, start, hard)
+	// A cut must leave content on both sides: after the first non-space rune and before the last.
+	contentStart := start
+	for contentStart < contentEnd {
+		r, size := utf8.DecodeRuneInString(l.text[contentStart:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		contentStart += size
+	}
+	// Trailing whitespace shorter than MaxSize can join the last content, so cuts stay before it;
+	// longer trailing whitespace needs a chunk of its own anyway.
+	tailAlone := l.length(contentEnd, hard) >= s.maxSize
+	usable := func(i int) bool { return i > contentStart && (i < contentEnd || tailAlone) }
 
 	// Spread the text to the next heading over even pieces when a block boundary lies within reach;
 	// otherwise spread the current block.
@@ -155,37 +168,59 @@ func (s *Splitter) cut(l *layout, start, hard, prevEnd int) int {
 	}
 	pieces := ceilDiv(remaining-s.overlap, s.size-s.overlap)
 	target := ceilDiv(remaining+(pieces-1)*s.overlap, pieces)
-	hi := l.lastPositionAt(base + upper)
 
-	// Prefer the highest-ranked boundary nearest the target. Beyond Size only block boundaries count,
-	// and no boundary may leave a tail within the slack before the next heading.
-	best, bestRank, bestDistance := -1, rankNone, 0
-	for i := lo; i <= hi && i < contentEnd; i++ {
-		value := l.ranks[i]
-		length := int(l.cp[i]) - base
-		if value <= rankNone || length > s.size && value != rankBlock || int(l.cp[hard])-int(l.cp[i]) <= slack {
-			continue
-		}
-		distance := abs(length - target)
-		if value > bestRank || value == bestRank && distance < bestDistance {
-			best, bestRank, bestDistance = i, value, distance
-		}
-	}
-	// Only enclosed boundaries ahead: cut at the last line boundary before the minimum instead.
-	if bestRank <= rankEnclosed {
-		for i := lo - 1; i > max(start, prevEnd); i-- {
-			if l.ranks[i] >= rankLine && i < contentEnd {
-				return i
+	// pick returns the highest-ranked usable boundary in [from, to] at or above floor, nearest the target.
+	// When strict, boundaries beyond Size must be block boundaries and none may leave a tail within the
+	// slack before the next heading.
+	pick := func(from, to int, floor rank, strict bool) (int, rank) {
+		best, bestRank, bestDistance := -1, floor-1, 0
+		for i := from; i <= to; i++ {
+			value := l.ranks[i]
+			length := int(l.cp[i]) - base
+			if value < floor || !usable(i) ||
+				strict && (length > s.size && value != rankBlock || int(l.cp[hard])-int(l.cp[i]) <= slack) {
+				continue
 			}
+			distance := abs(length - target)
+			if value > bestRank || value == bestRank && distance < bestDistance {
+				best, bestRank, bestDistance = i, value, distance
+			}
+		}
+		return best, bestRank
+	}
+	best, bestRank := pick(lo, l.lastPositionAt(base+upper), rankEnclosed, true)
+	if bestRank > rankEnclosed {
+		return best
+	}
+	// Keep a line or sentence whole when it still fits in MaxSize.
+	if wider, _ := pick(lo, l.lastPositionAt(base+s.maxSize), rankSpace, false); wider >= 0 {
+		return wider
+	}
+	// Otherwise cut at the last line boundary before the minimum.
+	for i := lo - 1; i > max(start, prevEnd); i-- {
+		if l.ranks[i] >= rankLine && usable(i) {
+			return i
 		}
 	}
 	if best >= 0 {
 		return best
 	}
-	// No boundary at all: cut at the target, or before trailing whitespace when that comes first.
+	// No boundary at all: cut at the target, kept within the content when possible.
 	position := l.positionAt(base + target)
-	if position >= contentEnd && contentEnd > max(start, prevEnd) {
-		position = contentEnd
+	if position >= contentEnd && contentStart < contentEnd && !tailAlone {
+		// Leave the last rune of content to the next chunk so it is not whitespace only.
+		_, size := utf8.DecodeLastRuneInString(l.text[:contentEnd])
+		position = contentEnd - size
+		if position <= max(start, prevEnd, contentStart) {
+			position = contentEnd
+		}
+	}
+	if after := int(l.cp[contentStart]) + 1; position <= contentStart && contentStart < contentEnd && after-base <= s.maxSize {
+		position = l.positionAt(after)
+	}
+	// Chunks must advance past the previous end.
+	if floor := max(start, prevEnd); position <= floor {
+		position = l.positionAt(int(l.cp[floor]) + 1)
 	}
 	return position
 }

@@ -111,8 +111,8 @@ var (
 
 // scan measures text and classifies its Markdown structure.
 func scan(text string) *layout {
-	if len(text) >= math.MaxInt32 {
-		panic("split: input of 2 GiB or more")
+	if len(text) > math.MaxInt32 {
+		panic("split: input longer than math.MaxInt32 bytes")
 	}
 	l := &layout{text: text, ranks: make([]rank, len(text)+1), cp: make([]int32, len(text)+1)}
 	l.measure()
@@ -284,14 +284,6 @@ func (l *layout) classifyFresh(lines []line, i, indent int, rest string, blank, 
 		return kindFence, newBlock()
 	case block && htmlStart(rest) != htmlNone:
 		return kindHTML, newBlock()
-	case block && isListItem(rest):
-		return kindListItem, newBlock()
-	case inList && indent >= 1:
-		return kindListCont, sameAsPrev()
-	case block && atxLevel(rest) > 0:
-		level := atxLevel(rest)
-		l.addHeading(lines, i, i, level, atxText(rest[level:]), lastNonBlank)
-		return kindHeading, newBlock()
 	case block && prevKind == kindText && isSetextUnderline(rest):
 		level := 1
 		if rest[0] == '-' {
@@ -311,6 +303,14 @@ func (l *layout) classifyFresh(lines []line, i, indent int, rest string, blank, 
 		return kindSetext, id
 	case block && isThematicBreak(rest):
 		return kindBreak, newBlock()
+	case block && isListItem(rest) && (prevKind != kindText || interruptsParagraph(rest)):
+		return kindListItem, newBlock()
+	case inList && indent >= 1:
+		return kindListCont, sameAsPrev()
+	case block && atxLevel(rest) > 0:
+		level := atxLevel(rest)
+		l.addHeading(lines, i, i, level, atxText(rest[level:]), lastNonBlank)
+		return kindHeading, newBlock()
 	case block && prevKind == kindText && isDelimiterRow(rest):
 		header := l.text[lines[i-1].start:lines[i-1].end]
 		headerCells := tableCells(header)
@@ -433,6 +433,7 @@ func (l *layout) rankWithin(ln line, heading bool) {
 	if !enclosed && !heading {
 		spans = codeSpans(text[ln.start:ln.end])
 	}
+	span := 0
 	for position := ln.start + 1; position <= ln.end; position++ {
 		if l.ranks[position] == rankInvalid {
 			continue
@@ -441,7 +442,13 @@ func (l *layout) rankWithin(ln line, heading bool) {
 		if !heading {
 			value = punctuationRank(text[ln.start:position])
 		}
-		if value > rankNone && (enclosed || insideSpan(spans, position-ln.start)) {
+		// Spans are sorted and positions increase, so the current span only moves forward.
+		offset := position - ln.start
+		for span < len(spans) && offset >= spans[span][1] {
+			span++
+		}
+		inside := span < len(spans) && offset > spans[span][0]
+		if value > rankNone && (enclosed || inside) {
 			value = rankEnclosed
 		}
 		l.ranks[position] = value
@@ -512,16 +519,6 @@ func codeSpans(content string) [][2]int {
 		i = closing + run
 	}
 	return spans
-}
-
-// insideSpan reports whether offset lies strictly inside one of spans.
-func insideSpan(spans [][2]int, offset int) bool {
-	for _, span := range spans {
-		if offset > span[0] && offset < span[1] {
-			return true
-		}
-	}
-	return false
 }
 
 // indentation returns the indentation width (tabs to the next multiple of 4) and the rest of the line.
@@ -636,6 +633,16 @@ func isListItem(rest string) bool {
 	return marker == len(rest) || rest[marker] == ' ' || rest[marker] == '\t'
 }
 
+// interruptsParagraph reports whether a list item may interrupt a paragraph:
+// it has content and, when ordered, starts at 1.
+func interruptsParagraph(rest string) bool {
+	marker := strings.IndexAny(rest, " \t")
+	if marker < 0 || isBlank(rest[marker:]) {
+		return false
+	}
+	return strings.ContainsRune("-*+", rune(rest[0])) || rest[:marker-1] == "1"
+}
+
 // htmlStart returns the end condition of an HTML block starting at rest.
 func htmlStart(rest string) htmlEnd {
 	if !strings.HasPrefix(rest, "<") {
@@ -698,8 +705,12 @@ func hasUnescapedPipe(s string) bool {
 func tableCells(row string) []string {
 	row = strings.TrimSpace(row)
 	row = strings.TrimPrefix(row, "|")
-	if strings.HasSuffix(row, "|") && !strings.HasSuffix(row, "\\|") {
-		row = row[:len(row)-1]
+	if strings.HasSuffix(row, "|") {
+		// The trailing pipe is escaped when an odd number of backslashes precede it.
+		backslashes := len(row) - 1 - len(strings.TrimRight(row[:len(row)-1], "\\"))
+		if backslashes%2 == 0 {
+			row = row[:len(row)-1]
+		}
 	}
 	var cells []string
 	start := 0

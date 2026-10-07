@@ -100,6 +100,18 @@ func checkContract(t testing.TB, s *Splitter, text string, chunks []Chunk) {
 			}
 			rebuilt.WriteString(text[prev.End:c.End])
 		}
+		// A whitespace-only chunk is allowed only inside a whitespace run of at least Size, or when it
+		// cannot join a neighbouring chunk within MaxSize.
+		if strings.TrimFunc(c.Text, unicode.IsSpace) == "" {
+			before := strings.TrimRightFunc(text[:c.Start], unicode.IsSpace)
+			after := strings.TrimLeftFunc(text[c.Start:], unicode.IsSpace)
+			longRun := measure(text[len(before):len(text)-len(after)]) >= s.size
+			joinsPrev := i > 0 && measure(text[chunks[i-1].Start:c.End]) <= s.maxSize
+			joinsNext := i+1 < len(chunks) && measure(text[c.Start:chunks[i+1].End]) <= s.maxSize
+			if !longRun && (joinsPrev || joinsNext) {
+				t.Fatalf("chunk %d [%d, %d) is whitespace only", i, c.Start, c.End)
+			}
+		}
 		anchor := c.Start + len(c.Text) - len(strings.TrimLeftFunc(c.Text, unicode.IsSpace))
 		for _, hard := range l.hardStarts {
 			if hard > anchor && hard < c.End {
@@ -273,10 +285,12 @@ func TestTableVariants(t *testing.T) {
 		text   string
 		header bool
 	}{
-		"no edge pipes":    {"x | y\n--|--\n" + rows, true},
-		"empty header":     {"| | |\n|---|---|\n" + rows, false},
-		"cell count":       {"x | y | z\n--|--\n" + rows, false},
-		"escaped pipe row": {"x \\| y\n--|--\n" + rows, false},
+		"no edge pipes":     {"x | y\n--|--\n" + rows, true},
+		"empty header":      {"| | |\n|---|---|\n" + rows, false},
+		"cell count":        {"x | y | z\n--|--\n" + rows, false},
+		"escaped pipe row":  {"x \\| y\n--|--\n" + rows, false},
+		"escaped backslash": {"x | y\\\\|\n--|--\n" + rows, true},
+		"after empty item":  {"Intro\n*\nx | y\n--|--\n" + rows, true},
 	} {
 		chunks := s.Split(tc.text)
 		checkContract(t, s, tc.text, chunks)
@@ -334,6 +348,9 @@ func TestHeadingsAreRecognised(t *testing.T) {
 		"after list":     {"- item\n\n# H\n", []string{"H"}},
 		"thematic break": {"---\n\n# H\n\n***\n", []string{"H"}},
 		"unclosed front": {"---\n# H\n", []string{"H"}},
+		"setext dash":    {"Title\n-\n\nbody\n", []string{"Title"}},
+		"break not list": {"* * *\n\n  # Real\n", []string{"Real"}},
+		"empty item":     {"Foo\n*\n\n# H\n", []string{"H"}},
 		"bom":            {"\uFEFF# H\n", []string{"H"}},
 	} {
 		var got []string
@@ -342,6 +359,69 @@ func TestHeadingsAreRecognised(t *testing.T) {
 		}
 		if strings.Join(got, "|") != strings.Join(tc.texts, "|") {
 			t.Errorf("%s: headings %q, want %q", name, got, tc.texts)
+		}
+	}
+}
+
+func TestSetextHeadingRange(t *testing.T) {
+	text := "Two\nlines\n===\n\n" + strings.Repeat("word ", 20)
+	s := mustNew(t, Options{Size: 30})
+	chunks := s.Split(text)
+	checkContract(t, s, text, chunks)
+	last := chunks[len(chunks)-1]
+	if len(last.Headings) != 1 {
+		t.Fatalf("last chunk %q headings = %+v", last.Text, last.Headings)
+	}
+	if h := last.Headings[0]; h.Level != 1 || h.Text != "Two lines" || text[h.Start:h.End] != "Two\nlines\n===" {
+		t.Errorf("heading = %+v", h)
+	}
+	if last.Context() != "Two lines" {
+		t.Errorf("Context() = %q", last.Context())
+	}
+}
+
+func TestStructuresFittingMaxSizeStayWhole(t *testing.T) {
+	s := mustNew(t, Options{Size: 20, MaxSize: 24})
+	heading := "# abcdefghijklmnopqrs\nx\n" + strings.Repeat("y", 60)
+	chunks := s.Split(heading)
+	checkContract(t, s, heading, chunks)
+	if chunks[0].Text != "# abcdefghijklmnopqrs\nx\n" {
+		t.Errorf("heading chunk = %q", chunks[0].Text)
+	}
+	code := "```\n" + strings.Repeat("c", 21) + "\n" + strings.Repeat("d", 21) + "\n```\n"
+	chunks = s.Split(code)
+	checkContract(t, s, code, chunks)
+	for _, c := range chunks {
+		for _, line := range strings.Split(strings.TrimSuffix(c.Text, "\n"), "\n") {
+			if strings.Trim(line, "cd") == "" && line != "" && len(line) != 21 {
+				t.Errorf("code line cut: %q in %q", line, c.Text)
+			}
+		}
+	}
+}
+
+func TestNoWhitespaceChunks(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		opts Options
+	}{
+		{"\n" + strings.Repeat("a", 700), Options{Size: 500}},
+		{strings.Repeat("word \n", 40), Options{Size: 4}},
+		{strings.Repeat("ab\n\n\n\n", 30), Options{Size: 3, MaxSize: 3}},
+	} {
+		s := mustNew(t, tc.opts)
+		checkContract(t, s, tc.text, s.Split(tc.text))
+	}
+}
+
+func TestMaxSizeEqualsSize(t *testing.T) {
+	text := strings.Repeat("一二三四五。六七八九十，", 20)
+	s := mustNew(t, Options{Size: 30, MaxSize: 30, Overlap: 5})
+	chunks := s.Split(text)
+	checkContract(t, s, text, chunks)
+	for _, c := range chunks {
+		if c.Length > 30 {
+			t.Errorf("chunk length %d", c.Length)
 		}
 	}
 }
@@ -479,6 +559,15 @@ func FuzzSplit(f *testing.F) {
 		s := mustNew(t, opts)
 		checkContract(t, s, text, s.Split(text))
 	})
+}
+
+func BenchmarkSplitCodeSpans(b *testing.B) {
+	text := strings.Repeat("`x` ", 40000)
+	s := mustNew(b, Options{Size: 500})
+	b.SetBytes(int64(len(text)))
+	for b.Loop() {
+		s.Split(text)
+	}
 }
 
 func BenchmarkSplit(b *testing.B) {

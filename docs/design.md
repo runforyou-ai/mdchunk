@@ -154,12 +154,18 @@ Within the contract, in priority order:
    otherwise split it into near-equal pieces around `Size`.
 3. Choose the highest-ranked boundary nearest each piece's target position:
    block > line break > sentence end > clause > whitespace > enclosed position >
-   any code point. Pieces are at least `max(Overlap+1, Size/2)` long when the
-   text allows, avoiding fragments.
+   any code point. Beyond `Size` only block boundaries count at first; when
+   that leaves only enclosed or no boundaries, a line break, sentence end,
+   clause or whitespace up to `MaxSize` keeps a line or heading whole. Pieces
+   are at least `max(Overlap+1, Size/2)` long when the text allows, avoiding
+   fragments.
 4. Start the next chunk at the highest-ranked, earliest boundary inside the
    overlap window; never start it at trailing whitespace.
+5. Every chunk holds some non-whitespace text, unless it lies in a whitespace
+   run of at least `Size` code points or cannot join either neighbouring chunk
+   within `MaxSize`.
 
-Sentence ends are `。！？` and `.!?` followed by whitespace; clauses are `，；`
+Sentence ends are `。！？`, and `.!?` followed by whitespace; clauses are `，；`,
 and `,;` followed by whitespace. Adjacent plain-text lines where the first ends
 in a letter or digit and the next starts with a letter, digit or mid-sentence
 punctuation are a soft wrap: the line break ranks as whitespace. A soft wrap
@@ -184,15 +190,18 @@ at most three spaces of indentation. Each line is classified in this order:
    Other `<…>` lines are text.
 4. Fence opening (three or more backticks or tildes).
 5. Blank line.
-6. ATX heading (`#`–`######` followed by space, tab or end of line).
-7. Setext underline (`=` or `-` run) directly after one or more paragraph lines:
+6. Setext underline (`=` or `-` run) directly after one or more paragraph lines:
    the whole paragraph becomes a level 1 or 2 heading.
-8. Thematic break (`***`, `---`, `___` with optional spaces).
-9. GFM table: a header row and a delimiter row with the same cell count start a
+7. Thematic break (`***`, `---`, `___` with optional spaces).
+8. List item (`-`, `*`, `+` or `1.`/`1)` followed by a space). Inside a
+   paragraph only an item with content, and for ordered lists starting at 1,
+   opens a list; otherwise the line continues the paragraph. Indented lines
+   after an item belong to it.
+9. ATX heading (`#`–`######` followed by space, tab or end of line).
+10. GFM table: a header row and a delimiter row with the same cell count start a
    table; it continues while lines contain an unescaped `|`. Leading and
    trailing pipes are optional. A header whose cells are all empty gives no
    `TableHeader`.
-10. List item (`-`, `*`, `+` or `1.`/`1)` followed by a space).
 11. Blockquote line (`>`).
 12. Indented code: four or more spaces after a blank line, outside a list.
 13. Paragraph text.
@@ -204,9 +213,11 @@ fence, table, HTML block, list item or blockquote.
 
 ### Complexity
 
-Linear time in the input length. Working memory is about 6 bytes per input byte
-(an `int8` boundary rank and an `int32` code point index per byte, plus line
-tables).
+Scanning is linear in the input length; choosing cuts scans at most
+`MaxSize` positions per chunk, so splitting is linear for a fixed
+`MaxSize / Size` ratio. Working memory is about 6 bytes per input byte (an
+`int8` boundary rank and an `int32` code point index per byte, plus line
+tables). Inputs longer than `math.MaxInt32` bytes panic.
 
 ## Package `convert`
 
