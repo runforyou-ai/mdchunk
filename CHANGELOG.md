@@ -14,3 +14,6 @@
 - Packages `convert/docx` and `convert/pptx`: Word and PowerPoint documents,
   with one section per slide, chart data as tables and encrypted or legacy
   files reported as `ErrEncrypted` and `ErrUnsupported`.
+- Packages `convert/csv` and `convert/xlsx`: CSV with delimiter, header and
+  quoting options; Excel with one section per sheet, displayed or raw values
+  and hidden sheets on request.
