@@ -82,6 +82,8 @@ type layout struct {
 	tables     []tableBlock
 	hardStarts []int // starts of headings that are not attached, ascending
 	blocks     []int // positions ranked rankBlock, ascending
+
+	contentEnds map[int]int // cache for contentEndBefore
 }
 
 // htmlEnd is the end condition of an open HTML block.
@@ -489,34 +491,37 @@ func softWrap(previous, current string) bool {
 	return unicode.IsLetter(first) || unicode.IsNumber(first) || strings.ContainsRune("，。、；：！？）」』》,.;:!?)", first)
 }
 
-// codeSpans returns the byte ranges strictly inside matched backtick code spans of a line.
+// codeSpans returns the byte ranges of matched backtick code spans of a line, ascending.
+// A run opens a span closed by the next run of the same length; runs inside a span are content.
 func codeSpans(content string) [][2]int {
-	var spans [][2]int
+	type run struct{ start, length int }
+	var runs []run
+	byLength := map[int][]int{} // run indexes per length, ascending
 	for i := 0; i < len(content); {
 		if content[i] != '`' {
 			i++
 			continue
 		}
-		run := leadingRun(content[i:], '`')
-		closing := -1
-		for j := i + run; j < len(content); {
-			if content[j] != '`' {
-				j++
-				continue
-			}
-			other := leadingRun(content[j:], '`')
-			if other == run {
-				closing = j
-				break
-			}
-			j += other
+		length := leadingRun(content[i:], '`')
+		byLength[length] = append(byLength[length], len(runs))
+		runs = append(runs, run{i, length})
+		i += length
+	}
+	var spans [][2]int
+	next := map[int]int{} // per length, the first candidate in byLength not yet passed
+	for i := 0; i < len(runs); i++ {
+		candidates := byLength[runs[i].length]
+		k := next[runs[i].length]
+		for k < len(candidates) && candidates[k] <= i {
+			k++
 		}
-		if closing < 0 {
-			i += run
+		next[runs[i].length] = k
+		if k == len(candidates) {
 			continue
 		}
-		spans = append(spans, [2]int{i, closing + run})
-		i = closing + run
+		closing := runs[candidates[k]]
+		spans = append(spans, [2]int{runs[i].start, closing.start + closing.length})
+		i = candidates[k]
 	}
 	return spans
 }

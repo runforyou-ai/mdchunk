@@ -570,6 +570,28 @@ func BenchmarkSplitCodeSpans(b *testing.B) {
 	}
 }
 
+func BenchmarkSplitLongWhitespace(b *testing.B) {
+	text := strings.Repeat(" ", 512<<10) + "x"
+	s := mustNew(b, Options{Size: 500})
+	b.SetBytes(int64(len(text)))
+	for b.Loop() {
+		s.Split(text)
+	}
+}
+
+func BenchmarkSplitUnmatchedBackticks(b *testing.B) {
+	var text strings.Builder
+	text.WriteString("start ")
+	for k := 1; k <= 2048; k++ {
+		text.WriteString(strings.Repeat("`", k) + "a ")
+	}
+	s := mustNew(b, Options{Size: 500})
+	b.SetBytes(int64(text.Len()))
+	for b.Loop() {
+		s.Split(text.String())
+	}
+}
+
 func BenchmarkSplit(b *testing.B) {
 	input, err := os.ReadFile("testdata/zh-policy.md")
 	if err != nil {

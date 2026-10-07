@@ -144,10 +144,12 @@ func (s *Splitter) cut(l *layout, start, hard, prevEnd int) int {
 	span := int(l.cp[hard]) - base
 	minimum := max(s.overlap+1, s.size/2)
 	slack := s.maxSize - s.size
-	contentEnd := lastContentEnd(l.text, start, hard)
+	contentEnd := max(l.contentEndBefore(hard), start)
 	// A cut must leave content on both sides: after the first non-space rune and before the last.
+	// The first content is only looked for within MaxSize; beyond it no cut can include it.
+	window := l.lastPositionAt(base + s.maxSize)
 	contentStart := start
-	for contentStart < contentEnd {
+	for contentStart < contentEnd && contentStart <= window {
 		r, size := utf8.DecodeRuneInString(l.text[contentStart:])
 		if !unicode.IsSpace(r) {
 			break
@@ -350,6 +352,20 @@ func (l *layout) nextBlock(position int) int {
 		return len(l.text)
 	}
 	return l.blocks[i]
+}
+
+// contentEndBefore returns the position after the last non-whitespace rune before hard, or 0.
+// Results are cached per hard position, so long trailing whitespace is scanned once.
+func (l *layout) contentEndBefore(hard int) int {
+	if end, ok := l.contentEnds[hard]; ok {
+		return end
+	}
+	end := lastContentEnd(l.text, 0, hard)
+	if l.contentEnds == nil {
+		l.contentEnds = make(map[int]int)
+	}
+	l.contentEnds[hard] = end
+	return end
 }
 
 // lastContentEnd returns the position after the last non-whitespace rune in text[start:end].
