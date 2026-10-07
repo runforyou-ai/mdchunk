@@ -57,6 +57,13 @@ func TestTableHeaders(t *testing.T) {
 	if want := "|  | 2025 |\n| --- | --- |\n| Jan | 10 |"; empty.Markdown() != want {
 		t.Errorf("explicit header = %q", empty.Markdown())
 	}
+	twice := NewTable(-1, true)
+	_ = twice.SetHeader([]string{"long header", "x"})
+	_ = twice.SetHeader([]string{"a"})
+	_ = twice.Add([]string{"1"})
+	if twice.size() != int64(len(twice.Markdown())) {
+		t.Errorf("SetHeader twice: size %d, rendered %d", twice.size(), len(twice.Markdown()))
+	}
 	none := NewTable(-1, false)
 	_ = none.Add([]string{"1", "2"})
 	if want := "|  |  |\n| --- | --- |\n| 1 | 2 |"; none.Markdown() != want {

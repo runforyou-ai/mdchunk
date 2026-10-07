@@ -180,7 +180,7 @@ func TestSlideListAndNotesOrder(t *testing.T) {
 	files["ppt/notesSlides/a.xml"], files["ppt/notesSlides/b.xml"] = notes("second"), notes("first")
 	files["ppt/slides/_rels/slide1.xml.rels"] = fmt.Sprintf(rels, rel("rId10", "notesSlide", "../notesSlides/a.xml")+rel("rId2", "notesSlide", "../notesSlides/b.xml"))
 	doc := run(t, pptx.Options{}, ooxmltest.Build(t, files))
-	if doc.Markdown != "one\n\nfirst\n\nsecond\n\ntwo" || len(doc.Sections) != 2 {
+	if doc.Markdown != "one\n\nfirst\n\nsecond\n\ntwo" || len(doc.Sections) != 2 || doc.Sections[0].Number != 1 || doc.Sections[1].Number != 2 {
 		t.Errorf("got %q, %d sections", doc.Markdown, len(doc.Sections))
 	}
 }

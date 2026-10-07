@@ -8,6 +8,7 @@
 package docx
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strconv"
@@ -31,6 +32,9 @@ type styleInfo struct {
 	heading     int
 	numID, ilvl string
 }
+
+// noHeading marks a style that explicitly is not a heading, stopping inheritance.
+const noHeading = -1
 
 // maxStyleChain bounds how many basedOn links are followed.
 const maxStyleChain = 16
@@ -101,6 +105,9 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err := w.Err(); err != nil {
 		return convert.Document{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return convert.Document{}, err
+	}
 	return convert.Document{Markdown: w.String()}, nil
 }
 
@@ -130,8 +137,13 @@ func (d *document) load(pkg *ooxml.Package) error {
 			info.heading = 1
 		} else if number, found := strings.CutPrefix(name, "heading "); found {
 			info.heading, _ = strconv.Atoi(number)
-		} else if outline, err := strconv.Atoi(style.Child("pPr").Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
-			info.heading = outline + 1
+		}
+		// An explicit outline level overrides the name; level 9 is body text.
+		if outline, err := strconv.Atoi(style.Child("pPr").Child("outlineLvl").Attr("val")); err == nil {
+			info.heading = noHeading
+			if outline < 9 {
+				info.heading = outline + 1
+			}
 		}
 		list := style.Child("pPr").Child("numPr")
 		info.numID, info.ilvl = list.Child("numId").Attr("val"), list.Child("ilvl").Attr("val")
@@ -189,6 +201,9 @@ func (d *document) styleHeading(id string) int {
 		if !ok {
 			return 0
 		}
+		if info.heading == noHeading {
+			return 0
+		}
 		if info.heading > 0 {
 			return info.heading
 		}
@@ -197,29 +212,34 @@ func (d *document) styleHeading(id string) int {
 	return 0
 }
 
-// styleNumbering returns the numbering instance and level a style applies,
-// following basedOn links; a level missing from the style comes from the
-// abstract numbering level linked to the style.
+// styleNumbering returns the numbering instance and level a style applies.
+// Along the basedOn chain the nearest numId and the nearest ilvl apply
+// separately; a level linked to the style by the abstract numbering
+// definition replaces the style's ilvl.
 func (d *document) styleNumbering(id string) (string, string) {
+	numID, ilvl, definer := "", "", ""
 	current := id
 	for range maxStyleChain {
 		info, ok := d.styles[current]
 		if !ok {
-			return "", ""
+			break
 		}
-		if info.numID != "" {
-			ilvl := info.ilvl
-			if ilvl == "" {
-				ilvl = d.styleLevels[d.numAbstract[info.numID]][id]
-			}
-			if ilvl == "" {
-				ilvl = d.styleLevels[d.numAbstract[info.numID]][current]
-			}
-			return info.numID, ilvl
+		if numID == "" && info.numID != "" {
+			numID, definer = info.numID, current
+		}
+		if ilvl == "" {
+			ilvl = info.ilvl
 		}
 		current = info.basedOn
 	}
-	return "", ""
+	if numID == "" {
+		return "", ""
+	}
+	linked := d.styleLevels[d.numAbstract[numID]]
+	if level := cmp.Or(linked[id], linked[definer]); level != "" {
+		ilvl = level
+	}
+	return numID, ilvl
 }
 
 // blocks renders paragraphs and tables in document order, unwrapping content controls.
@@ -262,8 +282,11 @@ func (d *document) paragraph(node *ooxml.Node) string {
 	properties := node.Child("pPr")
 	style := properties.Child("pStyle").Attr("val")
 	level := d.styleHeading(style)
-	if outline, err := strconv.Atoi(properties.Child("outlineLvl").Attr("val")); err == nil && outline < 9 {
-		level = outline + 1
+	if outline, err := strconv.Atoi(properties.Child("outlineLvl").Attr("val")); err == nil {
+		level = 0
+		if outline < 9 {
+			level = outline + 1
+		}
 	}
 	if level > 0 {
 		return strings.Repeat("#", min(level, 6)) + " " + strings.Join(strings.Fields(text), " ")
