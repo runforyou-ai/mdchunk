@@ -1,8 +1,8 @@
 // Package csv converts comma-separated values to a GFM table.
 //
-// The first record is the header unless Options.NoHeader is set, in which
-// case every record is a body row under an empty header row of the same
-// width. Rows are padded to the widest record; empty records are skipped.
+// Empty records are skipped. The first remaining record is the header unless
+// Options.NoHeader is set, in which case every record is a body row under an
+// empty header row of the same width. Rows are padded to the widest record.
 package csv
 
 import (

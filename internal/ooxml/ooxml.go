@@ -160,7 +160,8 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 }
 
 // CheckXML reads the XML part at name to its end without keeping it and
-// returns convert.ErrCorrupt when it is not well-formed. Reads count against
+// returns convert.ErrCorrupt when it is not well-formed, including mismatched
+// or unclosed elements. Reads count against
 // the expansion limit; cancellation is checked between tokens in batches.
 func (p *Package) CheckXML(ctx context.Context, name string) error {
 	file, err := p.archive.Open(name)
@@ -182,7 +183,7 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 				return err
 			}
 		}
-		_, err := decoder.RawToken()
+		_, err := decoder.Token()
 		if limited != nil && limited.N == 0 {
 			return &convert.LimitError{Limit: convert.LimitExpanded, Max: p.max}
 		}
@@ -193,6 +194,44 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 			return fmt.Errorf("%w: %s: %w", convert.ErrCorrupt, name, err)
 		}
 	}
+}
+
+// XMLParts returns the names of the parts [Content_Types].xml declares as XML,
+// by part name or by extension. Without content types, parts ending in .xml or
+// .rels are returned.
+func (p *Package) XMLParts() ([]string, error) {
+	types, err := p.ReadPart("[Content_Types].xml")
+	if err != nil {
+		return nil, err
+	}
+	isXML := func(contentType string) bool {
+		contentType = strings.ToLower(strings.TrimSpace(contentType))
+		return strings.HasSuffix(contentType, "+xml") || strings.HasSuffix(contentType, "/xml")
+	}
+	defaults, overrides := map[string]bool{}, map[string]bool{}
+	if types == nil {
+		defaults["xml"], defaults["rels"] = true, true
+	}
+	for _, item := range types.Child("Types").Elements() {
+		switch item.Name {
+		case "Default":
+			defaults[strings.ToLower(item.Attr("Extension"))] = isXML(item.Attr("ContentType"))
+		case "Override":
+			overrides[strings.ToLower(strings.TrimPrefix(item.Attr("PartName"), "/"))] = isXML(item.Attr("ContentType"))
+		}
+	}
+	var names []string
+	for _, entry := range p.archive.File {
+		name := strings.ToLower(entry.Name)
+		xmlPart, overridden := overrides[name]
+		if !overridden {
+			xmlPart = defaults[strings.TrimPrefix(path.Ext(name), ".")]
+		}
+		if xmlPart && !strings.HasSuffix(entry.Name, "/") {
+			names = append(names, entry.Name)
+		}
+	}
+	return names, nil
 }
 
 // RequirePart is ReadPart for a part the document cannot do without; a missing

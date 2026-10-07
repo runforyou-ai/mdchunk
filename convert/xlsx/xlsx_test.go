@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -91,6 +92,17 @@ func TestOptions(t *testing.T) {
 // rezip rewrites the entries of a zip archive with edit applied to the named entry.
 func rezip(t *testing.T, data []byte, name string, edit func(string) string) []byte {
 	t.Helper()
+	return rezipAll(t, data, func(entry, content string) (string, string) {
+		if entry == name {
+			return entry, edit(content)
+		}
+		return entry, content
+	})
+}
+
+// rezipAll rewrites every entry of a zip archive through edit, which may rename it.
+func rezipAll(t *testing.T, data []byte, edit func(name, content string) (string, string)) []byte {
+	t.Helper()
 	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatal(err)
@@ -105,19 +117,34 @@ func rezip(t *testing.T, data []byte, name string, edit func(string) string) []b
 		if err != nil {
 			t.Fatal(err)
 		}
-		files[entry.Name] = string(content)
-		if entry.Name == name {
-			files[entry.Name] = edit(string(content))
-		}
+		name, edited := edit(entry.Name, string(content))
+		files[name] = edited
 	}
 	return ooxmltest.Build(t, files)
 }
 
 func TestCorruptSheetAndNUL(t *testing.T) {
 	data := workbook(t)
-	truncated := rezip(t, data, "xl/worksheets/sheet1.xml", func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")+20] })
-	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(truncated)}); !errors.Is(err, convert.ErrCorrupt) {
-		t.Errorf("truncated sheet: %v", err)
+	for name, edit := range map[string]func(string) string{
+		"truncated in a tag":     func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")+20] },
+		"truncated before a row": func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")] },
+		"mismatched end tag":     func(s string) string { return strings.Replace(s, "</row>", "</broken>", 1) },
+	} {
+		corrupt := rezip(t, data, "xl/worksheets/sheet1.xml", edit)
+		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(corrupt)}); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// A sheet part without the .xml extension is still checked through its content type.
+	renamed := rezipAll(t, data, func(name, content string) (string, string) {
+		if name == "xl/worksheets/sheet1.xml" {
+			return "xl/worksheets/sheet1", strings.Replace(content, "</row>", "</broken>", 1)
+		}
+		content = strings.ReplaceAll(content, "worksheets/sheet1.xml", "worksheets/sheet1")
+		return name, content
+	})
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(renamed)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("renamed corrupt sheet: %v", err)
 	}
 	f := excelize.NewFile()
 	defer func() { _ = f.Close() }()
@@ -162,6 +189,19 @@ func TestSourceLimitAndHiddenFirst(t *testing.T) {
 	doc := run(t, xlsx.Options{}, buf.Bytes())
 	if len(doc.Sections) != 2 || doc.Sections[0].Start != doc.Sections[0].End || doc.Sections[1].Number != 2 || doc.Sections[1].Name != "visible" {
 		t.Errorf("sections = %+v", doc.Sections)
+	}
+}
+
+func TestNoTemporaryFilesLeft(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	data := workbook(t)
+	broken := rezip(t, data, "xl/styles.xml", func(string) string { return "<styleSheet>" })
+	for _, input := range [][]byte{data, broken} {
+		_, _ = xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(input)})
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("left in the temporary directory: %v, %v", entries, err)
 	}
 }
 

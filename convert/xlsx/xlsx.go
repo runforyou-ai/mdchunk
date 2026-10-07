@@ -14,7 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
+	"os"
 
 	"github.com/xuri/excelize/v2"
 
@@ -61,11 +61,13 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		return convert.Document{}, err
 	}
 	// The row iterator skips some malformed XML, so every XML part is checked first.
-	for _, entry := range pkg.Files() {
-		if strings.HasSuffix(entry.Name, ".xml") || strings.HasSuffix(entry.Name, ".rels") {
-			if err := pkg.CheckXML(ctx, entry.Name); err != nil {
-				return convert.Document{}, err
-			}
+	parts, err := pkg.XMLParts()
+	if err != nil {
+		return convert.Document{}, err
+	}
+	for _, name := range parts {
+		if err := pkg.CheckXML(ctx, name); err != nil {
+			return convert.Document{}, err
 		}
 	}
 	return c.render(ctx, data, limits)
@@ -79,7 +81,14 @@ func (c *Converter) render(ctx context.Context, data []byte, limits convert.Limi
 			doc, err = convert.Document{}, fmt.Errorf("%w: %v", convert.ErrCorrupt, recovered)
 		}
 	}()
-	file, err := excelize.OpenReader(bytes.NewReader(data))
+	// The library unpacks large parts to temporary files; a directory per
+	// conversion removes them whether or not opening succeeds.
+	dir, err := os.MkdirTemp("", "mdchunk-xlsx-")
+	if err != nil {
+		return convert.Document{}, fmt.Errorf("mdchunk/convert/xlsx: temporary directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	file, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{TmpDir: dir})
 	if file != nil {
 		defer func() { _ = file.Close() }()
 	}

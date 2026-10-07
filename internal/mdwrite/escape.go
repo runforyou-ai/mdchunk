@@ -6,7 +6,7 @@ import (
 	"github.com/runforyou-ai/mdchunk/convert"
 )
 
-// lineEndings converts CRLF and lone CR to LF.
+// lineEndings converts CRLF and lone CR to LF and drops NUL bytes.
 var lineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\x00", "")
 
 // Paragraph escapes source text so that none of its lines opens a Markdown

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 
@@ -44,7 +45,7 @@ func TestTables(t *testing.T) {
 }
 
 func TestErrors(t *testing.T) {
-	for _, comma := range []rune{'"', '\n', -1} {
+	for _, comma := range []rune{'"', '\n', '\r', utf8.RuneError, -1} {
 		if _, err := run(csv.Options{Comma: comma}, "a,b\n"); err == nil || errors.Is(err, convert.ErrCorrupt) {
 			t.Errorf("Comma %q: %v", comma, err)
 		}
