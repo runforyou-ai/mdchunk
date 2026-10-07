@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding"
 
@@ -45,8 +46,13 @@ func New(opts Options) *Converter {
 	return &Converter{opts: opts}
 }
 
-// Convert converts in to a Markdown table.
+// Convert converts in to a Markdown table. An invalid Comma is a configuration
+// error, reported before reading.
 func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Document, error) {
+	if c.opts.Comma != 0 && (c.opts.Comma == '"' || c.opts.Comma == '\r' || c.opts.Comma == '\n' ||
+		c.opts.Comma == utf8.RuneError || !utf8.ValidRune(c.opts.Comma)) {
+		return convert.Document{}, fmt.Errorf("mdchunk/convert/csv: invalid Comma %q", c.opts.Comma)
+	}
 	limits := c.opts.Effective()
 	data, err := source.Read(ctx, in, limits.MaxBytes)
 	if err != nil {
@@ -57,7 +63,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if c.opts.Comma != 0 {
 		reader.Comma = c.opts.Comma
 	}
-	table := mdwrite.NewTable(limits.MaxOutputBytes)
+	table := mdwrite.NewTable(limits.MaxOutputBytes, !c.opts.NoHeader)
 	for count := 0; ; count++ {
 		if count%1024 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -76,7 +82,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		}
 	}
 	w := mdwrite.New(limits.MaxOutputBytes)
-	w.WriteString(table.Markdown(!c.opts.NoHeader))
+	w.WriteString(table.Markdown())
 	if err := w.Err(); err != nil {
 		return convert.Document{}, err
 	}

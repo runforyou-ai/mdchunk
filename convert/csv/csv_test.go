@@ -44,10 +44,31 @@ func TestTables(t *testing.T) {
 }
 
 func TestErrors(t *testing.T) {
+	for _, comma := range []rune{'"', '\n', -1} {
+		if _, err := run(csv.Options{Comma: comma}, "a,b\n"); err == nil || errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("Comma %q: %v", comma, err)
+		}
+	}
 	if _, err := run(csv.Options{}, "a,b\nx\"y,2\n"); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("strict quotes: %v", err)
 	}
 	if _, err := run(csv.Options{Limits: convert.Limits{MaxOutputBytes: 20}}, strings.Repeat("abc,def\n", 10)); !errors.Is(err, convert.ErrTooLarge) {
 		t.Errorf("output limit: %v", err)
 	}
+}
+
+func FuzzConvert(f *testing.F) {
+	for _, seed := range []string{"a,b\n1,2\n", "\"x\"\"y\",z\n", "a|b,\x00\n"} {
+		f.Add(seed)
+	}
+	c := csv.New(csv.Options{LazyQuotes: true, Limits: convert.Limits{MaxOutputBytes: 1 << 20}})
+	f.Fuzz(func(t *testing.T, src string) {
+		doc, err := c.Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)})
+		if err != nil && (doc.Markdown != "" || !errors.Is(err, convert.ErrCorrupt) && !errors.Is(err, convert.ErrTooLarge)) {
+			t.Fatalf("%q, %v", doc.Markdown, err)
+		}
+		if strings.ContainsAny(doc.Markdown, "\r\x00") {
+			t.Fatalf("output not normalised: %q", doc.Markdown)
+		}
+	})
 }

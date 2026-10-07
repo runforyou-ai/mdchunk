@@ -1,9 +1,12 @@
 package xlsx_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
@@ -85,6 +88,83 @@ func TestOptions(t *testing.T) {
 	}
 }
 
+// rezip rewrites the entries of a zip archive with edit applied to the named entry.
+func rezip(t *testing.T, data []byte, name string, edit func(string) string) []byte {
+	t.Helper()
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{}
+	for _, entry := range archive.File {
+		r, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[entry.Name] = string(content)
+		if entry.Name == name {
+			files[entry.Name] = edit(string(content))
+		}
+	}
+	return ooxmltest.Build(t, files)
+}
+
+func TestCorruptSheetAndNUL(t *testing.T) {
+	data := workbook(t)
+	truncated := rezip(t, data, "xl/worksheets/sheet1.xml", func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")+20] })
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(truncated)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("truncated sheet: %v", err)
+	}
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+	if err := f.SetCellValue("Sheet1", "A1", "a_x0000_b"); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	doc := run(t, xlsx.Options{}, buf.Bytes())
+	if strings.ContainsRune(doc.Markdown, 0) {
+		t.Errorf("NUL in output: %q", doc.Markdown)
+	}
+}
+
+func TestSourceLimitAndHiddenFirst(t *testing.T) {
+	data := workbook(t)
+	if _, err := xlsx.New(xlsx.Options{Limits: convert.Limits{MaxBytes: int64(len(data))}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); err != nil {
+		t.Errorf("at limit: %v", err)
+	}
+	var limit *convert.LimitError
+	if _, err := xlsx.New(xlsx.Options{Limits: convert.Limits{MaxBytes: int64(len(data)) - 1}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); !errors.As(err, &limit) || limit.Limit != convert.LimitSource {
+		t.Errorf("one byte over: %v", err)
+	}
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(f.SetCellValue("Sheet1", "A1", "hidden"))
+	_, err := f.NewSheet("visible")
+	must(err)
+	must(f.SetCellValue("visible", "A1", "shown"))
+	f.SetActiveSheet(1)
+	must(f.SetSheetVisible("Sheet1", false))
+	var buf bytes.Buffer
+	must(f.Write(&buf))
+	doc := run(t, xlsx.Options{}, buf.Bytes())
+	if len(doc.Sections) != 2 || doc.Sections[0].Start != doc.Sections[0].End || doc.Sections[1].Number != 2 || doc.Sections[1].Name != "visible" {
+		t.Errorf("sections = %+v", doc.Sections)
+	}
+}
+
 func TestErrors(t *testing.T) {
 	data := workbook(t)
 	for name, tc := range map[string]struct {
@@ -103,4 +183,14 @@ func TestErrors(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", name, err, tc.want)
 		}
 	}
+}
+
+func FuzzConvert(f *testing.F) {
+	f.Add([]byte("PK"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		doc, err := xlsx.New(xlsx.Options{Limits: convert.Limits{MaxOutputBytes: 1 << 20}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+		if err != nil && doc.Markdown != "" {
+			t.Fatalf("partial document on error")
+		}
+	})
 }

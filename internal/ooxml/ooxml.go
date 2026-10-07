@@ -4,6 +4,7 @@ package ooxml
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -154,6 +155,42 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 			}
 		case xml.CharData:
 			stack[len(stack)-1].Text += string(token)
+		}
+	}
+}
+
+// CheckXML reads the XML part at name to its end without keeping it and
+// returns convert.ErrCorrupt when it is not well-formed. Reads count against
+// the expansion limit; cancellation is checked between tokens in batches.
+func (p *Package) CheckXML(ctx context.Context, name string) error {
+	file, err := p.archive.Open(name)
+	if err != nil {
+		return fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
+	}
+	defer func() { _ = file.Close() }()
+	var reader io.Reader = file
+	var limited *io.LimitedReader
+	if p.max >= 0 && p.remaining < math.MaxInt64 {
+		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
+		reader = limited
+		defer func() { p.remaining = max(limited.N-1, 0) }()
+	}
+	decoder := xml.NewDecoder(reader)
+	for count := 0; ; count++ {
+		if count%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		_, err := decoder.RawToken()
+		if limited != nil && limited.N == 0 {
+			return &convert.LimitError{Limit: convert.LimitExpanded, Max: p.max}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %s: %w", convert.ErrCorrupt, name, err)
 		}
 	}
 }

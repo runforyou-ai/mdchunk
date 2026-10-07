@@ -7,10 +7,10 @@ import (
 )
 
 // lineEndings converts CRLF and lone CR to LF.
-var lineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+var lineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n", "\x00", "")
 
 // Paragraph escapes source text so that none of its lines opens a Markdown
-// block structure: line endings become LF, indentation is removed and a
+// block structure: line endings become LF, NUL bytes are dropped, indentation is removed and a
 // line-leading marker is backslash-escaped.
 func Paragraph(text string) string {
 	lines := strings.Split(lineEndings.Replace(text), "\n")
@@ -40,9 +40,10 @@ func escapeLine(line string) string {
 }
 
 // cellEscapes escapes backslashes and pipes in table cells.
-var cellEscapes = strings.NewReplacer(`\`, `\\`, "|", `\|`)
+var cellEscapes = strings.NewReplacer(`\`, `\\`, "|", `\|`, "\x00", "")
 
-// Cell collapses whitespace in a table cell and escapes backslashes and pipes.
+// Cell collapses whitespace in a table cell, drops NUL bytes and escapes
+// backslashes and pipes.
 func Cell(text string) string {
 	return cellEscapes.Replace(strings.Join(strings.Fields(text), " "))
 }
