@@ -224,8 +224,21 @@ tables). Inputs longer than `math.MaxInt32` bytes panic.
 
 ```go
 // Format is a normalised file extension: lower case, no dot, aliases resolved
-// (markdown→md, htm→html, yml→yaml).
+// (markdown→md, text→txt, htm→html, yml→yaml).
 type Format string
+
+// Formats of the built-in converters.
+const (
+	Text     Format = "txt"
+	Markdown Format = "md"
+	JSON     Format = "json"
+	HTML     Format = "html"
+	CSV      Format = "csv"
+	DOCX     Format = "docx"
+	PPTX     Format = "pptx"
+	XLSX     Format = "xlsx"
+	PDF      Format = "pdf"
+)
 
 func ParseFormat(s string) Format          // accepts "PDF", ".pdf", "markdown"
 func FormatOf(filename string) (Format, bool)
@@ -290,6 +303,9 @@ type Limits struct {
 	MaxOutputBytes   int64 // Markdown bytes produced; default 64 MiB
 }
 
+// Effective returns the limits with defaults applied; -1 means unlimited.
+func (l Limits) Effective() Limits
+
 var (
 	ErrUnsupported = errors.New("mdchunk/convert: unsupported format")
 	ErrEncrypted   = errors.New("mdchunk/convert: encrypted document")
@@ -342,17 +358,19 @@ holding that package's `Options`.
 
 ### Text decoding
 
-Shared by text, HTML and CSV: a BOM wins, then `Input.Charset`, then (HTML
-only) the first `<meta>` declaration before `<body>`, then UTF-8. Invalid
-UTF-8 is decoded with `Options.Fallback` when set (for example GB18030),
-otherwise invalid bytes become U+FFFD.
+Shared by text, HTML and CSV: a BOM (UTF-8, UTF-16 or UTF-32) wins, then
+`Input.Charset`, then (HTML only) the first `<meta>` declaration before
+`<body>`, then UTF-8. A declared charset is used only when it names a known
+encoding other than the replacement encoding. Undeclared input that is not
+valid UTF-8 is decoded with `Options.Fallback` when set (for example
+GB18030). Bytes that cannot be decoded become U+FFFD.
 
 ### Built-in converters
 
-- `convert/text`: `text.Markdown(opts)` and `text.Plain(opts)` emit the decoded
-  text; plain text is read as Markdown by the splitter, as most plain text is.
-  `text.JSON(opts)` wraps the decoded text in a `json` fence longer than any
-  backtick run it contains.
+- `convert/text`: `text.New(opts)` for plain text and Markdown emits the
+  decoded text; plain text is read as Markdown by the splitter, as most plain
+  text is. `text.JSON(opts)` wraps the decoded text in a `json` fence longer
+  than any backtick run it contains.
 - `convert/html`: `html.New(opts)`. CommonMark with GFM tables; spanned cells
   repeated; a table without header cells promotes its first row; relative links
   resolved against `Input.BaseURL`.
