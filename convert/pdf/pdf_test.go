@@ -3,10 +3,7 @@ package pdf_test
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/rc4"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -15,105 +12,8 @@ import (
 
 	"github.com/runforyou-ai/mdchunk/convert"
 	"github.com/runforyou-ai/mdchunk/convert/pdf"
+	"github.com/runforyou-ai/mdchunk/internal/pdftest"
 )
-
-// text is a line drawn at y with font size.
-type text struct {
-	size float64
-	y    float64
-	s    string
-	x    float64 // 0 means the left margin, 72
-}
-
-// build writes a PDF with one page per entry, using Helvetica. A non-empty
-// userPassword adds an RC4 standard security handler that requires it.
-func build(t testing.TB, pages [][]text, userPassword string) []byte {
-	t.Helper()
-	return buildPDF(pages, userPassword, false)
-}
-
-// buildPDF writes the PDF build describes. With encryptStreams the document
-// carries the security handler even without a user password, and content
-// streams are RC4-encrypted with their object keys, as an owner-only document's are.
-func buildPDF(pages [][]text, userPassword string, encryptStreams bool) []byte {
-	id := "0123456789abcdef"
-	encrypted := userPassword != "" || encryptStreams
-	o, u, fileKey := securityValues(userPassword, "owner", id, -4)
-	var objects []string
-	add := func(body string) int {
-		objects = append(objects, body)
-		return len(objects)
-	}
-	catalog := add("") // filled once the pages object exists
-	pagesID := add("")
-	font := add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-	var kids []string
-	for _, lines := range pages {
-		var content strings.Builder
-		for _, l := range lines {
-			x := l.x
-			if x == 0 {
-				x = 72
-			}
-			fmt.Fprintf(&content, "BT /F1 %g Tf %g %g Td (%s) Tj ET\n", l.size, x, l.y, l.s)
-		}
-		body := content.String()
-		if encryptStreams {
-			number := len(objects) + 1
-			objectKey := md5.Sum(append(append([]byte{}, fileKey...), byte(number), byte(number>>8), byte(number>>16), 0, 0))
-			body = string(rc4Crypt(objectKey[:10], []byte(body)))
-		}
-		stream := add(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(body), body))
-		page := add(fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>", pagesID, font, stream))
-		kids = append(kids, fmt.Sprintf("%d 0 R", page))
-	}
-	objects[catalog-1] = fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesID)
-	objects[pagesID-1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), len(kids))
-	trailer := fmt.Sprintf("/Root %d 0 R", catalog)
-	if encrypted {
-		encrypt := add(fmt.Sprintf("<< /Filter /Standard /V 1 /R 2 /O <%x> /U <%x> /P -4 >>", o, u))
-		trailer += fmt.Sprintf(" /Encrypt %d 0 R /ID [<%x> <%x>]", encrypt, id, id)
-	}
-	var out bytes.Buffer
-	out.WriteString("%PDF-1.4\n")
-	offsets := make([]int, len(objects))
-	for i, body := range objects {
-		offsets[i] = out.Len()
-		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", i+1, body)
-	}
-	xref := out.Len()
-	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
-	for _, offset := range offsets {
-		fmt.Fprintf(&out, "%010d 00000 n \n", offset)
-	}
-	fmt.Fprintf(&out, "trailer\n<< /Size %d %s >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, trailer, xref)
-	return out.Bytes()
-}
-
-// padding is the password padding of the standard security handler.
-var padding = []byte{0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
-	0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A}
-
-// rc4Crypt encrypts or decrypts data with key.
-func rc4Crypt(key, data []byte) []byte {
-	cipher, _ := rc4.NewCipher(key)
-	out := make([]byte, len(data))
-	cipher.XORKeyStream(out, data)
-	return out
-}
-
-// securityValues computes the /O and /U entries and the file key for revision 2 RC4 encryption.
-func securityValues(user, owner, id string, permissions int32) ([]byte, []byte, []byte) {
-	pad := func(password string) []byte {
-		return append([]byte(password), padding...)[:32]
-	}
-	ownerKey := md5.Sum(pad(owner))
-	o := rc4Crypt(ownerKey[:5], pad(user))
-	p := uint32(permissions)
-	seed := append(append(pad(user), o...), byte(p), byte(p>>8), byte(p>>16), byte(p>>24))
-	key := md5.Sum(append(seed, id...))
-	return o, rc4Crypt(key[:5], padding), key[:5]
-}
 
 // converter is shared so PDFium starts once for the package's tests.
 var converter = pdf.New(pdf.Options{})
@@ -125,10 +25,10 @@ func run(t *testing.T, data []byte) (convert.Document, error) {
 }
 
 func TestPages(t *testing.T) {
-	data := build(t, [][]text{
-		{{24, 700, "Annual Report", 0}, {12, 660, "Revenue grew in every region this year,", 0}, {12, 646, "led by strong demand.", 0}, {12, 600, "- not a list", 0}},
+	data := pdftest.Build(t, [][]pdftest.Text{
+		{pdftest.L(24, 700, "Annual Report"), pdftest.L(12, 660, "Revenue grew in every region this year,"), pdftest.L(12, 646, "led by strong demand."), pdftest.L(12, 600, "- not a list")},
 		{},
-		{{18, 700, "Outlook", 0}, {12, 660, "Next year looks steady.", 0}},
+		{pdftest.L(18, 700, "Outlook"), pdftest.L(12, 660, "Next year looks steady.")},
 	}, "")
 	doc, err := run(t, data)
 	if err != nil {
@@ -161,36 +61,36 @@ func TestPages(t *testing.T) {
 func TestNoHeadingsAndNoText(t *testing.T) {
 	c := pdf.New(pdf.Options{NoHeadings: true, Workers: 1})
 	defer func() { _ = c.Close() }()
-	doc, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(build(t, [][]text{{{24, 700, "Title", 0}, {12, 650, "Body text here.", 0}}}, ""))})
+	doc, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(pdftest.Build(t, [][]pdftest.Text{{pdftest.L(24, 700, "Title"), pdftest.L(12, 650, "Body text here.")}}, ""))})
 	if err != nil || doc.Markdown != "Title\n\nBody text here." {
 		t.Errorf("got %q, %v", doc.Markdown, err)
 	}
-	doc, err = run(t, build(t, [][]text{{}, {}}, ""))
+	doc, err = run(t, pdftest.Build(t, [][]pdftest.Text{{}, {}}, ""))
 	if err != nil || doc.Markdown != "" || len(doc.Sections) != 2 || doc.Sections[1].Start != 0 {
 		t.Errorf("no text: %+v, %v", doc, err)
 	}
 }
 
 func TestLayout(t *testing.T) {
-	body := text{12, 600, "This body paragraph is long enough to outweigh every heading on the page.", 0}
+	body := pdftest.L(12, 600, "This body paragraph is long enough to outweigh every heading on the page.")
 	for name, tc := range map[string]struct {
-		lines []text
+		lines []pdftest.Text
 		want  string
 	}{
-		"same line":          {[]text{{12, 700, "Hello", 0}, {12, 700, "world", 110}}, "Hello world"},
-		"overlapping":        {[]text{{12, 700, "above", 0}, {12, 697, "below", 0}}, "above below"},
-		"underscore":         {[]text{{12, 700, "foo_bar baz", 0}}, "foo_bar baz"},
-		"decimal":            {[]text{{12, 700, "Value 1.23 in file.txt", 0}}, "Value 1.23 in file.txt"},
-		"heading underscore": {[]text{{24, 700, "snake_case names", 0}, body}, "# snake_case names\n\n" + body.s},
-		"continuation":       {[]text{{24, 700, "Line one", 0}, {24, 676, "Line two", 0}, body}, "# Line one Line two\n\n" + body.s},
-		"levels": {[]text{{30, 740, "Alpha", 0}, {24, 700, "Beta", 0}, {18, 660, "Gamma", 0}, {14, 630, "Delta", 0}, body},
-			"# Alpha\n\n## Beta\n\n### Gamma\n\n### Delta\n\n" + body.s},
-		"embedded newline":    {[]text{{24, 700, `Title\n# hidden`, 0}, body}, "# Title # hidden\n\n" + body.s},
-		"carriage return":     {[]text{{12, 700, `first\rsecond`, 0}}, "first second"},
-		"punctuation":         {[]text{{12, 700, "Hello, world!", 0}, {12, 686, ".NET Framework, \"quoted\"", 0}}, "Hello, world!\n.NET Framework, \"quoted\""},
-		"heading punctuation": {[]text{{24, 700, "Hello, World!", 0}, body}, "# Hello, World!\n\n" + body.s},
+		"same line":          {[]pdftest.Text{pdftest.L(12, 700, "Hello"), pdftest.LX(12, 110, 700, "world")}, "Hello world"},
+		"overlapping":        {[]pdftest.Text{pdftest.L(12, 700, "above"), pdftest.L(12, 697, "below")}, "above below"},
+		"underscore":         {[]pdftest.Text{pdftest.L(12, 700, "foo_bar baz")}, "foo_bar baz"},
+		"decimal":            {[]pdftest.Text{pdftest.L(12, 700, "Value 1.23 in file.txt")}, "Value 1.23 in file.txt"},
+		"heading underscore": {[]pdftest.Text{pdftest.L(24, 700, "snake_case names"), body}, "# snake_case names\n\n" + body.S},
+		"continuation":       {[]pdftest.Text{pdftest.L(24, 700, "Line one"), pdftest.L(24, 676, "Line two"), body}, "# Line one Line two\n\n" + body.S},
+		"levels": {[]pdftest.Text{pdftest.L(30, 740, "Alpha"), pdftest.L(24, 700, "Beta"), pdftest.L(18, 660, "Gamma"), pdftest.L(14, 630, "Delta"), body},
+			"# Alpha\n\n## Beta\n\n### Gamma\n\n### Delta\n\n" + body.S},
+		"embedded newline":    {[]pdftest.Text{pdftest.L(24, 700, `Title\n# hidden`), body}, "# Title # hidden\n\n" + body.S},
+		"carriage return":     {[]pdftest.Text{pdftest.L(12, 700, `first\rsecond`)}, "first second"},
+		"punctuation":         {[]pdftest.Text{pdftest.L(12, 700, "Hello, world!"), pdftest.L(12, 686, ".NET Framework, \"quoted\"")}, "Hello, world!\n.NET Framework, \"quoted\""},
+		"heading punctuation": {[]pdftest.Text{pdftest.L(24, 700, "Hello, World!"), body}, "# Hello, World!\n\n" + body.S},
 	} {
-		doc, err := run(t, build(t, [][]text{tc.lines}, ""))
+		doc, err := run(t, pdftest.Build(t, [][]pdftest.Text{tc.lines}, ""))
 		if err != nil || doc.Markdown != tc.want {
 			t.Errorf("%s: got %q, %v\nwant %q", name, doc.Markdown, err, tc.want)
 		}
@@ -212,7 +112,7 @@ func (c cancelOnEOF) Read(p []byte) (int, error) {
 }
 
 func TestSourceLimitAndCancel(t *testing.T) {
-	data := build(t, [][]text{{{12, 700, "x", 0}}, {{12, 700, "y", 0}}}, "")
+	data := pdftest.Build(t, [][]pdftest.Text{{pdftest.L(12, 700, "x")}, {pdftest.L(12, 700, "y")}}, "")
 	c := pdf.New(pdf.Options{Limits: convert.Limits{MaxBytes: int64(len(data)) - 1}})
 	defer func() { _ = c.Close() }()
 	var limit *convert.LimitError
@@ -226,7 +126,7 @@ func TestSourceLimitAndCancel(t *testing.T) {
 }
 
 func TestConcurrentClose(t *testing.T) {
-	data := build(t, [][]text{{{12, 700, "hello", 0}}}, "")
+	data := pdftest.Build(t, [][]pdftest.Text{{pdftest.L(12, 700, "hello")}}, "")
 	c := pdf.New(pdf.Options{Workers: 1})
 	if _, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); err != nil {
 		t.Fatal(err)
@@ -252,7 +152,7 @@ func TestConcurrentClose(t *testing.T) {
 }
 
 func TestOwnerPasswordOnly(t *testing.T) {
-	doc, err := run(t, buildPDF([][]text{{{12, 700, "readable without a password", 0}}}, "", true))
+	doc, err := run(t, pdftest.BuildOwnerOnly([][]pdftest.Text{{pdftest.L(12, 700, "readable without a password")}}))
 	if err != nil || doc.Markdown != "readable without a password" {
 		t.Errorf("got %q, %v", doc.Markdown, err)
 	}
@@ -265,7 +165,7 @@ func TestErrors(t *testing.T) {
 	}{
 		"empty":     {nil, convert.ErrCorrupt},
 		"garbage":   {[]byte("%PDF-1.4 not really"), convert.ErrCorrupt},
-		"encrypted": {build(t, [][]text{{{12, 700, "secret", 0}}}, "user"), convert.ErrEncrypted},
+		"encrypted": {pdftest.Build(t, [][]pdftest.Text{{pdftest.L(12, 700, "secret")}}, "user"), convert.ErrEncrypted},
 	} {
 		if _, err := run(t, tc.data); !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", name, err, tc.want)
@@ -274,14 +174,14 @@ func TestErrors(t *testing.T) {
 	small := pdf.New(pdf.Options{Limits: convert.Limits{MaxOutputBytes: 5}})
 	defer func() { _ = small.Close() }()
 	_, err := small.Convert(context.Background(),
-		convert.Input{Reader: bytes.NewReader(build(t, [][]text{{{12, 700, "more than five", 0}}}, ""))})
+		convert.Input{Reader: bytes.NewReader(pdftest.Build(t, [][]pdftest.Text{{pdftest.L(12, 700, "more than five")}}, ""))})
 	if !errors.Is(err, convert.ErrTooLarge) {
 		t.Errorf("output limit: %v", err)
 	}
 }
 
 func TestLifecycle(t *testing.T) {
-	data := build(t, [][]text{{{12, 700, "hello", 0}}}, "")
+	data := pdftest.Build(t, [][]pdftest.Text{{pdftest.L(12, 700, "hello")}}, "")
 	c := pdf.New(pdf.Options{Workers: 1})
 	var wg sync.WaitGroup
 	for range 4 {

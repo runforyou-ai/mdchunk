@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.0
 
 - Package `split`: structure-aware Markdown splitter with byte-range chunks,
   inherited heading paths and table headers, bounded overlap and a hard length
@@ -19,3 +19,5 @@
   and hidden sheets on request.
 - Package `convert/pdf`: PDF through PDFium WebAssembly with one section per
   page, font-size headings, bounded workers and an idempotent `Close`.
+- Package `convert/all`: every built-in converter in one registry with shared
+  limits and fallback encoding.
