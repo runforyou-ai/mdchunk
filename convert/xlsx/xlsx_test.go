@@ -127,7 +127,7 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	data := workbook(t)
 	for name, edit := range map[string]func(string) string{
 		"truncated in a tag":     func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")+20] },
-		"truncated before a row": func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")] },
+		"truncated before a row": func(s string) string { before, _, _ := strings.Cut(s, "<row r=\"2\""); return before },
 		"mismatched end tag":     func(s string) string { return strings.Replace(s, "</row>", "</broken>", 1) },
 	} {
 		corrupt := rezip(t, data, "xl/worksheets/sheet1.xml", edit)
