@@ -9,7 +9,7 @@
 // attempted. A PDF without a text layer yields empty Markdown and one empty
 // section per page. Documents that need a password to open return
 // convert.ErrEncrypted; documents restricted only by an owner password convert
-// normally.
+// normally, and permission flags are not checked.
 package pdf
 
 import (
@@ -154,7 +154,14 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, err
 	}
-	return render(lines, pages, !c.opts.NoHeadings, limits.MaxOutputBytes)
+	doc, err := render(lines, pages, !c.opts.NoHeadings, limits.MaxOutputBytes)
+	if err != nil {
+		return convert.Document{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return convert.Document{}, err
+	}
+	return doc, nil
 }
 
 // line is a line of text on a page in PDF points, y axis pointing up.
@@ -163,7 +170,6 @@ type line struct {
 	text                     string
 	size                     float64
 	left, right, top, bottom float64
-	space                    bool // a space follows the last character
 }
 
 // height returns the line's height in points.
@@ -207,33 +213,42 @@ func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, e
 		}
 		lines = appendChars(lines, index, page.Chars)
 	}
+	// Extraction does not observe ctx, so cancellation is checked once it is done.
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	return lines, count.PageCount, nil
 }
 
 // appendChars groups a page's characters, in PDFium's text order, into lines.
-// Each character is read once; control characters count as spaces. A line's
-// font size is the size of most of its characters.
+// Each character is read once; control characters count as spaces. A
+// character joins the current line when its box overlaps the line's
+// vertically and it does not move back to the left.
+// A line's font size is the size of most of its characters.
 func appendChars(lines []line, page int, chars []*responses.GetPageTextStructuredChar) []line {
 	first := len(lines)
 	weights := map[float64]int{}
+	var text []byte
+	var last rune
 	finish := func() {
-		if len(lines) > first {
-			l := &lines[len(lines)-1]
-			best := -1
-			for size, count := range weights {
-				if count > best || count == best && size < l.size {
-					l.size, best = size, count
-				}
-			}
-			clear(weights)
+		if len(lines) == first {
+			return
 		}
+		l := &lines[len(lines)-1]
+		l.text = string(text)
+		best := -1
+		for size, count := range weights {
+			if count > best || count == best && size < l.size {
+				l.size, best = size, count
+			}
+		}
+		clear(weights)
 	}
+	space := false
 	for _, char := range chars {
 		r, _ := utf8.DecodeRuneInString(char.Text)
 		if char.Text == "" || unicode.IsSpace(r) || unicode.IsControl(r) {
-			if len(lines) > first {
-				lines[len(lines)-1].space = true
-			}
+			space = space || len(lines) > first
 			continue
 		}
 		size := 0.0
@@ -241,31 +256,38 @@ func appendChars(lines []line, page int, chars []*responses.GetPageTextStructure
 			size = char.FontInformation.RenderedSize
 		}
 		position := char.PointPosition
-		center := (position.Top + position.Bottom) / 2
 		current := len(lines) - 1
-		if current < first || center < lines[current].bottom || center > lines[current].top ||
-			position.Left < lines[current].right-max(size, lines[current].height())*2 {
-			finish()
-			lines = append(lines, line{page: page, text: char.Text,
-				left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
-			weights[size]++
-			continue
-		}
-		l := &lines[current]
-		last, _ := utf8.DecodeLastRuneInString(l.text)
-		// A gap between characters reads as a space unless either side is CJK.
-		if l.space || position.Left-l.right > max(size, l.height())*0.2 && last < wideRune && r < wideRune {
-			if !strings.HasSuffix(l.text, " ") {
-				l.text += " "
+		if current >= first {
+			l := &lines[current]
+			overlap := min(position.Top, l.top) - max(position.Bottom, l.bottom)
+			sameLine := overlap > 0 && position.Left >= l.right-max(size, l.height())*2
+			if sameLine {
+				// A gap between characters reads as a space unless either side is CJK.
+				gap := position.Left-l.right > max(size, l.height())*0.2 && last < wideRune && r < wideRune
+				if (space || gap) && last != ' ' {
+					text = append(text, ' ')
+				}
+				text = append(text, char.Text...)
+				last, space = lastRune(char.Text), false
+				weights[size]++
+				l.right, l.top, l.bottom = max(l.right, position.Right), max(l.top, position.Top), min(l.bottom, position.Bottom)
+				continue
 			}
 		}
-		l.space = false
-		l.text += char.Text
+		finish()
+		lines = append(lines, line{page: page, left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
+		text = append(text[:0:0], char.Text...)
+		last, space = lastRune(char.Text), false
 		weights[size]++
-		l.right, l.top, l.bottom = max(l.right, position.Right), max(l.top, position.Top), min(l.bottom, position.Bottom)
 	}
 	finish()
 	return lines
+}
+
+// lastRune returns the last rune of s.
+func lastRune(s string) rune {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return r
 }
 
 // render writes lines as Markdown with one section per page.

@@ -415,12 +415,14 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   text, as a file holding less text would.
 - `convert/pdf`: `pdf.New(opts)` returns `*pdf.Converter` with `Close() error`.
   One `KindPage` section per page. Characters are read once each, in PDFium's
-  text order, and grouped into lines by position; control characters count as
-  spaces. The dominant font size is body text, larger short lines become
+  text order; a character joins the current line when its box overlaps the
+  line vertically and it does not move back to the left. Control characters
+  count as spaces. The dominant font size is body text, larger short lines become
   headings (`NoHeadings` disables this), and paragraphs break on spacing or
   size changes. Multi-column layout and table recovery are not attempted.
   Documents that need a password to open return `ErrEncrypted`; documents
-  restricted only by an owner password convert normally.
+  restricted only by an owner password convert normally, and permission flags
+  are not checked.
 - `convert/all`: `all.New(opts) (*all.Registry, error)`. Embeds
   `*convert.Registry` with every format above registered, and `Close` releases
   the converters it created (the PDF pool), not ones registered later.

@@ -29,6 +29,16 @@ type text struct {
 // userPassword adds an RC4 standard security handler that requires it.
 func build(t testing.TB, pages [][]text, userPassword string) []byte {
 	t.Helper()
+	return buildPDF(pages, userPassword, false)
+}
+
+// buildPDF writes the PDF build describes. With encryptStreams the document
+// carries the security handler even without a user password, and content
+// streams are RC4-encrypted with their object keys, as an owner-only document's are.
+func buildPDF(pages [][]text, userPassword string, encryptStreams bool) []byte {
+	id := "0123456789abcdef"
+	encrypted := userPassword != "" || encryptStreams
+	o, u, fileKey := securityValues(userPassword, "owner", id, -4)
 	var objects []string
 	add := func(body string) int {
 		objects = append(objects, body)
@@ -47,16 +57,20 @@ func build(t testing.TB, pages [][]text, userPassword string) []byte {
 			}
 			fmt.Fprintf(&content, "BT /F1 %g Tf %g %g Td (%s) Tj ET\n", l.size, x, l.y, l.s)
 		}
-		stream := add(fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", content.Len(), content.String()))
+		body := content.String()
+		if encryptStreams {
+			number := len(objects) + 1
+			objectKey := md5.Sum(append(append([]byte{}, fileKey...), byte(number), byte(number>>8), byte(number>>16), 0, 0))
+			body = string(rc4Crypt(objectKey[:10], []byte(body)))
+		}
+		stream := add(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(body), body))
 		page := add(fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>", pagesID, font, stream))
 		kids = append(kids, fmt.Sprintf("%d 0 R", page))
 	}
 	objects[catalog-1] = fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesID)
 	objects[pagesID-1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), len(kids))
 	trailer := fmt.Sprintf("/Root %d 0 R", catalog)
-	if userPassword != "" {
-		id := "0123456789abcdef"
-		o, u := securityValues(userPassword, "owner", id, -4)
+	if encrypted {
 		encrypt := add(fmt.Sprintf("<< /Filter /Standard /V 1 /R 2 /O <%x> /U <%x> /P -4 >>", o, u))
 		trailer += fmt.Sprintf(" /Encrypt %d 0 R /ID [<%x> <%x>]", encrypt, id, id)
 	}
@@ -80,23 +94,25 @@ func build(t testing.TB, pages [][]text, userPassword string) []byte {
 var padding = []byte{0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
 	0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A}
 
-// securityValues computes the /O and /U entries for revision 2 RC4 encryption.
-func securityValues(user, owner, id string, permissions int32) ([]byte, []byte) {
+// rc4Crypt encrypts or decrypts data with key.
+func rc4Crypt(key, data []byte) []byte {
+	cipher, _ := rc4.NewCipher(key)
+	out := make([]byte, len(data))
+	cipher.XORKeyStream(out, data)
+	return out
+}
+
+// securityValues computes the /O and /U entries and the file key for revision 2 RC4 encryption.
+func securityValues(user, owner, id string, permissions int32) ([]byte, []byte, []byte) {
 	pad := func(password string) []byte {
 		return append([]byte(password), padding...)[:32]
 	}
-	crypt := func(key, data []byte) []byte {
-		cipher, _ := rc4.NewCipher(key)
-		out := make([]byte, len(data))
-		cipher.XORKeyStream(out, data)
-		return out
-	}
 	ownerKey := md5.Sum(pad(owner))
-	o := crypt(ownerKey[:5], pad(user))
+	o := rc4Crypt(ownerKey[:5], pad(user))
 	p := uint32(permissions)
 	seed := append(append(pad(user), o...), byte(p), byte(p>>8), byte(p>>16), byte(p>>24))
 	key := md5.Sum(append(seed, id...))
-	return o, crypt(key[:5], padding)
+	return o, rc4Crypt(key[:5], padding), key[:5]
 }
 
 // converter is shared so PDFium starts once for the package's tests.
@@ -166,8 +182,10 @@ func TestLayout(t *testing.T) {
 		"continuation": {[]text{{24, 700, "Line one", 0}, {24, 676, "Line two", 0}, body}, "# Line one Line two\n\n" + body.s},
 		"levels": {[]text{{30, 740, "Alpha", 0}, {24, 700, "Beta", 0}, {18, 660, "Gamma", 0}, {14, 630, "Delta", 0}, body},
 			"# Alpha\n\n## Beta\n\n### Gamma\n\n### Delta\n\n" + body.s},
-		"embedded newline": {[]text{{24, 700, `Title\n# hidden`, 0}, body}, "# Title # hidden\n\n" + body.s},
-		"carriage return":  {[]text{{12, 700, `first\rsecond`, 0}}, "first second"},
+		"embedded newline":    {[]text{{24, 700, `Title\n# hidden`, 0}, body}, "# Title # hidden\n\n" + body.s},
+		"carriage return":     {[]text{{12, 700, `first\rsecond`, 0}}, "first second"},
+		"punctuation":         {[]text{{12, 700, "Hello, world!", 0}, {12, 686, ".NET Framework, \"quoted\"", 0}}, "Hello, world!\n.NET Framework, \"quoted\""},
+		"heading punctuation": {[]text{{24, 700, "Hello, World!", 0}, body}, "# Hello, World!\n\n" + body.s},
 	} {
 		doc, err := run(t, build(t, [][]text{tc.lines}, ""))
 		if err != nil || doc.Markdown != tc.want {
@@ -210,9 +228,9 @@ func TestConcurrentClose(t *testing.T) {
 	if _, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); err != nil {
 		t.Fatal(err)
 	}
-	blocker := &slowReader{release: make(chan struct{}), data: data}
+	blocker := newSlowReader(data)
 	go func() { _, _ = c.Convert(context.Background(), convert.Input{Reader: blocker}) }()
-	time.Sleep(50 * time.Millisecond)
+	<-blocker.reading
 	results := make(chan error, 2)
 	for range 2 {
 		go func() { results <- c.Close() }()
@@ -227,6 +245,13 @@ func TestConcurrentClose(t *testing.T) {
 		if err := <-results; err != nil {
 			t.Errorf("Close: %v", err)
 		}
+	}
+}
+
+func TestOwnerPasswordOnly(t *testing.T) {
+	doc, err := run(t, buildPDF([][]text{{{12, 700, "readable without a password", 0}}}, "", true))
+	if err != nil || doc.Markdown != "readable without a password" {
+		t.Errorf("got %q, %v", doc.Markdown, err)
 	}
 }
 
@@ -266,14 +291,9 @@ func TestLifecycle(t *testing.T) {
 	wg.Wait()
 
 	// A call waiting for the only worker honours its context.
-	blocker := &slowReader{release: make(chan struct{}), data: data}
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		_, _ = c.Convert(context.Background(), convert.Input{Reader: blocker})
-	}()
-	<-started
-	time.Sleep(50 * time.Millisecond)
+	blocker := newSlowReader(data)
+	go func() { _, _ = c.Convert(context.Background(), convert.Input{Reader: blocker}) }()
+	<-blocker.reading
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, err := c.Convert(ctx, convert.Input{Reader: bytes.NewReader(data)}); !errors.Is(err, context.DeadlineExceeded) {
@@ -309,15 +329,22 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
-// slowReader blocks its first read until release is closed.
+// slowReader signals reading on its first read, then blocks until release is closed.
 type slowReader struct {
 	release chan struct{}
+	reading chan struct{}
 	data    []byte
 	read    bool
 }
 
+// newSlowReader returns a slowReader serving data.
+func newSlowReader(data []byte) *slowReader {
+	return &slowReader{release: make(chan struct{}), reading: make(chan struct{}), data: data}
+}
+
 func (r *slowReader) Read(p []byte) (int, error) {
 	if !r.read {
+		close(r.reading)
 		<-r.release
 		r.read = true
 	}
