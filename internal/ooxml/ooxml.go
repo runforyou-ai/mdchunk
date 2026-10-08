@@ -160,8 +160,8 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 }
 
 // CheckXML reads the XML part at name to its end without keeping it and
-// returns convert.ErrCorrupt when it is not well-formed, including mismatched
-// or unclosed elements. Reads count against
+// returns convert.ErrCorrupt when it is not well-formed: mismatched or
+// unclosed elements, other than one root element, or text outside it. Reads count against
 // the expansion limit; cancellation is checked between tokens in batches.
 func (p *Package) CheckXML(ctx context.Context, name string) error {
 	file, err := p.archive.Open(name)
@@ -177,28 +177,46 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 		defer func() { p.remaining = max(limited.N-1, 0) }()
 	}
 	decoder := xml.NewDecoder(reader)
+	depth, roots := 0, 0
 	for count := 0; ; count++ {
 		if count%4096 == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
-		_, err := decoder.Token()
+		token, err := decoder.Token()
 		if limited != nil && limited.N == 0 {
 			return &convert.LimitError{Limit: convert.LimitExpanded, Max: p.max}
 		}
 		if errors.Is(err, io.EOF) {
+			if roots != 1 {
+				return fmt.Errorf("%w: %s has %d root elements", convert.ErrCorrupt, name, roots)
+			}
 			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("%w: %s: %w", convert.ErrCorrupt, name, err)
 		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				roots++
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && len(bytes.TrimSpace(token)) > 0 {
+				return fmt.Errorf("%w: %s has text outside its root element", convert.ErrCorrupt, name)
+			}
+		}
 	}
 }
 
-// XMLParts returns the names of the parts [Content_Types].xml declares as XML,
-// by part name or by extension. Without content types, parts ending in .xml or
-// .rels are returned.
+// XMLParts returns the parts to check as XML: those [Content_Types].xml
+// declares as XML, by part name or extension, and those whose content starts
+// like XML. [Content_Types].xml itself, already parsed, is left out; parts
+// that cannot be opened are left to the reader that needs them.
 func (p *Package) XMLParts() ([]string, error) {
 	types, err := p.ReadPart("[Content_Types].xml")
 	if err != nil {
@@ -209,9 +227,6 @@ func (p *Package) XMLParts() ([]string, error) {
 		return strings.HasSuffix(contentType, "+xml") || strings.HasSuffix(contentType, "/xml")
 	}
 	defaults, overrides := map[string]bool{}, map[string]bool{}
-	if types == nil {
-		defaults["xml"], defaults["rels"] = true, true
-	}
 	for _, item := range types.Child("Types").Elements() {
 		switch item.Name {
 		case "Default":
@@ -222,16 +237,33 @@ func (p *Package) XMLParts() ([]string, error) {
 	}
 	var names []string
 	for _, entry := range p.archive.File {
-		name := strings.ToLower(entry.Name)
-		xmlPart, overridden := overrides[name]
-		if !overridden {
-			xmlPart = defaults[strings.TrimPrefix(path.Ext(name), ".")]
+		if entry.Name == "[Content_Types].xml" || strings.HasSuffix(entry.Name, "/") {
+			continue
 		}
-		if xmlPart && !strings.HasSuffix(entry.Name, "/") {
+		name := strings.ToLower(entry.Name)
+		declared, overridden := overrides[name]
+		if !overridden {
+			declared = defaults[strings.TrimPrefix(path.Ext(name), ".")]
+		}
+		if declared || looksLikeXML(entry) {
 			names = append(names, entry.Name)
 		}
 	}
 	return names, nil
+}
+
+// looksLikeXML reports whether an entry's content starts with "<" after an
+// optional BOM and whitespace.
+func looksLikeXML(entry *zip.File) bool {
+	file, err := entry.Open()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }()
+	head := make([]byte, 64)
+	n, _ := io.ReadFull(file, head)
+	head = bytes.TrimLeft(bytes.TrimPrefix(head[:n], []byte{0xEF, 0xBB, 0xBF}), " \t\r\n")
+	return len(head) > 0 && head[0] == '<'
 }
 
 // RequirePart is ReadPart for a part the document cannot do without; a missing

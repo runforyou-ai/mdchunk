@@ -129,6 +129,7 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 		"truncated in a tag":     func(s string) string { return s[:strings.Index(s, "<row r=\"2\"")+20] },
 		"truncated before a row": func(s string) string { before, _, _ := strings.Cut(s, "<row r=\"2\""); return before },
 		"mismatched end tag":     func(s string) string { return strings.Replace(s, "</row>", "</broken>", 1) },
+		"two roots":              func(s string) string { return s + "<extra/>" },
 	} {
 		corrupt := rezip(t, data, "xl/worksheets/sheet1.xml", edit)
 		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(corrupt)}); !errors.Is(err, convert.ErrCorrupt) {
@@ -145,6 +146,19 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	})
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(renamed)}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("renamed corrupt sheet: %v", err)
+	}
+	// Renamed through the relationships only, the content types still name the old part.
+	undeclared := rezipAll(t, data, func(name, content string) (string, string) {
+		switch name {
+		case "xl/worksheets/sheet1.xml":
+			return "xl/worksheets/data.bin", strings.Replace(content, "</row>", "</broken>", 1)
+		case "xl/_rels/workbook.xml.rels":
+			return name, strings.ReplaceAll(content, "worksheets/sheet1.xml", "worksheets/data.bin")
+		}
+		return name, content
+	})
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(undeclared)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("undeclared corrupt sheet: %v", err)
 	}
 	f := excelize.NewFile()
 	defer func() { _ = f.Close() }()
@@ -195,13 +209,70 @@ func TestSourceLimitAndHiddenFirst(t *testing.T) {
 func TestNoTemporaryFilesLeft(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
-	data := workbook(t)
-	broken := rezip(t, data, "xl/styles.xml", func(string) string { return "<styleSheet>" })
-	for _, input := range [][]byte{data, broken} {
-		_, _ = xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(input)})
+	// A worksheet over the library's 16 MiB threshold is unpacked to a temporary
+	// file; an entry with an unsupported compression method then fails opening.
+	f := excelize.NewFile()
+	stream, err := f.NewStreamWriter("Sheet1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell := strings.Repeat("x", 1000)
+	for row := 1; row <= 20000; row++ {
+		name, _ := excelize.CoordinatesToCellName(1, row)
+		if err := stream.SetRow(name, []any{cell}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stream.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	archive, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	w := zip.NewWriter(&out)
+	for _, entry := range archive.File {
+		if err := w.Copy(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := w.CreateRaw(&zip.FileHeader{Name: "xl/media/broken.bin", Method: 99, CompressedSize64: 4, UncompressedSize64: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = raw.Write([]byte("data"))
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(out.Bytes())}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("unsupported entry: %v", err)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Errorf("left in the temporary directory: %v, %v", entries, err)
+	}
+}
+
+func TestExpandedLimitAtTotal(t *testing.T) {
+	data := workbook(t)
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, entry := range archive.File {
+		total += int64(entry.UncompressedSize64)
+	}
+	if _, err := xlsx.New(xlsx.Options{Limits: convert.Limits{MaxExpandedBytes: total}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); err != nil {
+		t.Errorf("at the limit: %v", err)
+	}
+	if _, err := xlsx.New(xlsx.Options{Limits: convert.Limits{MaxExpandedBytes: total - 1}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); !errors.Is(err, convert.ErrTooLarge) {
+		t.Errorf("one byte over: %v", err)
 	}
 }
 
