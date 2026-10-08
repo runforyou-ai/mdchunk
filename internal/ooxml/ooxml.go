@@ -225,14 +225,23 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 	}
 }
 
+// xmlRelationships are relationship types whose targets readers parse as
+// XML content; their targets are always checked.
+var xmlRelationships = map[string]bool{
+	"officeDocument": true, "worksheet": true, "sharedStrings": true, "styles": true, "theme": true,
+}
+
 // XMLParts returns the parts to check as XML: those [Content_Types].xml
-// declares as XML, by part name or extension, and parts a relationship
-// targets whose content starts like XML. [Content_Types].xml is checked
-// strictly here and counted once; parts that cannot be opened are left to
-// the reader that needs them.
+// declares as XML, by part name or extension, targets of relationships whose
+// content readers parse as XML, and other relationship targets whose content
+// starts like XML. Targets are resolved as readers resolve them, with
+// backslashes as slashes and dot segments removed. [Content_Types].xml is
+// checked strictly here and counted once; parts that cannot be opened are left
+// to the reader that needs them.
 func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 	const contentTypes = "[Content_Types].xml"
-	if _, err := p.archive.Open(contentTypes); err == nil {
+	if file, err := p.archive.Open(contentTypes); err == nil {
+		_ = file.Close()
 		if err := p.CheckXML(ctx, contentTypes); err != nil {
 			return nil, err
 		}
@@ -263,7 +272,7 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 	}
 	// Relationship targets are found from relationship parts read without counting;
 	// those parts are XML and are checked, and counted, like any other.
-	targets := map[string]bool{}
+	targets := map[string]bool{} // target -> always checked
 	for _, entry := range p.archive.File {
 		if !strings.HasSuffix(entry.Name, ".rels") {
 			continue
@@ -277,13 +286,13 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 			if item.Attr("TargetMode") == "External" {
 				continue
 			}
-			target := item.Attr("Target")
+			target := strings.ReplaceAll(item.Attr("Target"), `\`, "/")
 			if strings.HasPrefix(target, "/") {
-				target = strings.TrimPrefix(target, "/")
+				target = strings.TrimPrefix(path.Clean(target), "/")
 			} else {
 				target = path.Join(base, target)
 			}
-			targets[target] = true
+			targets[target] = targets[target] || xmlRelationships[path.Base(item.Attr("Type"))]
 		}
 	}
 	var names []string
@@ -291,7 +300,8 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 		if entry.Name == contentTypes || strings.HasSuffix(entry.Name, "/") {
 			continue
 		}
-		if declared(entry.Name) || strings.HasSuffix(entry.Name, ".rels") || targets[entry.Name] && looksLikeXML(entry) {
+		always, targeted := targets[strings.ReplaceAll(entry.Name, `\`, "/")]
+		if declared(entry.Name) || strings.HasSuffix(entry.Name, ".rels") || always || targeted && looksLikeXML(entry) {
 			names = append(names, entry.Name)
 		}
 	}

@@ -172,6 +172,30 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(padded)}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("padded undeclared corrupt sheet: %v", err)
 	}
+	for name, tc := range map[string]struct{ target, content string }{
+		"dot segments": {"/xl/worksheets/../worksheets/data.bin", ""},
+		"backslash":    {`worksheets\data.bin`, ""},
+		"not like XML": {"worksheets/data.bin", "garbage"},
+		"NUL prefix":   {"worksheets/data.bin", "\x00"},
+		"whitespace":   {"worksheets/data.bin", "   "},
+	} {
+		renamed := rezipAll(t, data, func(name, content string) (string, string) {
+			switch name {
+			case "xl/worksheets/sheet1.xml":
+				if tc.content != "" {
+					return "xl/worksheets/data.bin", tc.content
+				}
+				before, _, _ := strings.Cut(content, "<row r=\"2\"")
+				return "xl/worksheets/data.bin", before
+			case "xl/_rels/workbook.xml.rels":
+				return name, strings.ReplaceAll(content, "worksheets/sheet1.xml", tc.target)
+			}
+			return name, content
+		})
+		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(renamed)}); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("renamed sheet with %s: %v", name, err)
+		}
+	}
 	for name, edit := range map[string]func(string) string{
 		"extra root": func(s string) string { return s + "<extra/>" },
 		"text":       func(s string) string { return s + "garbage" },
