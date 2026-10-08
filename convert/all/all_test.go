@@ -155,7 +155,11 @@ func TestXLSXChunksMapToSheets(t *testing.T) {
 	must(err)
 	splitter, err := split.New(split.Options{Size: 120})
 	must(err)
-	for _, c := range splitter.Split(doc.Markdown) {
+	chunks := splitter.Split(doc.Markdown)
+	if len(chunks) == 0 {
+		t.Fatal("no chunks")
+	}
+	for _, c := range chunks {
 		sections := doc.SectionsIn(c.Start, c.End)
 		if len(sections) != 1 {
 			t.Fatalf("chunk %q maps to %d sheets", c.Text, len(sections))

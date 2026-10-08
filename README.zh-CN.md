@@ -27,7 +27,7 @@ go get github.com/runforyou-ai/mdchunk
 
 ```go
 converters := all.New(all.Options{})
-defer converters.Close()
+defer func() { _ = converters.Close() }()
 
 format, _ := convert.FormatOf("report.pdf")
 doc, err := converters.Convert(ctx, format, convert.Input{Reader: file})
