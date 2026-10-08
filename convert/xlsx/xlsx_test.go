@@ -209,6 +209,39 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(mixed)}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("mixed separators and dot segments: %v", err)
 	}
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var twice bytes.Buffer
+	zw := zip.NewWriter(&twice)
+	for _, entry := range archive.File {
+		if err := zw.Copy(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extra, err := zw.Create("xl/worksheets/sheet1.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = extra.Write([]byte("<worksheet>"))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(twice.Bytes())}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("duplicate sheet: %v", err)
+	}
+	for _, part := range []string{"xl/sharedStrings.xml", "xl/styles.xml"} {
+		missing := rezipAll(t, data, func(name, content string) (string, string) {
+			if name == part {
+				return "unused/" + name, content
+			}
+			return name, content
+		})
+		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(missing)}); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("missing %s: %v", part, err)
+		}
+	}
 	// Shared strings are read from a fixed path, without a relationship or an XML content type.
 	unlisted := rezipAll(t, data, func(name, content string) (string, string) {
 		switch name {

@@ -88,7 +88,8 @@ type Package struct {
 
 // Open opens data as an OOXML package. maxExpanded < 0 means unlimited.
 // Encrypted documents return convert.ErrEncrypted, legacy binary Office files
-// convert.ErrUnsupported and anything else that is not a zip convert.ErrCorrupt.
+// convert.ErrUnsupported, and anything else that is not a zip, or holds two
+// entries whose names differ only in case or separators, convert.ErrCorrupt.
 func Open(data []byte, maxExpanded int64) (*Package, error) {
 	if bytes.HasPrefix(data, oleMagic) {
 		if bytes.Contains(data, encryptionInfo) {
@@ -99,6 +100,15 @@ func Open(data []byte, maxExpanded int64) (*Package, error) {
 	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
+	}
+	// Readers disagree on which of two same-named entries wins, so duplicates are damage.
+	names := map[string]bool{}
+	for _, entry := range archive.File {
+		name := strings.ToLower(strings.ReplaceAll(entry.Name, `\`, "/"))
+		if names[name] {
+			return nil, fmt.Errorf("%w: duplicate part %s", convert.ErrCorrupt, entry.Name)
+		}
+		names[name] = true
 	}
 	return &Package{archive: archive, max: maxExpanded, remaining: maxExpanded}, nil
 }
@@ -283,6 +293,7 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 	// Relationship targets are found from relationship parts read without counting;
 	// those parts are XML and are checked, and counted, like any other.
 	targets := map[string]bool{} // target -> always checked
+	var required [][2]string     // both resolutions of each core relationship target
 	for _, entry := range p.archive.File {
 		if !strings.HasSuffix(entry.Name, ".rels") {
 			continue
@@ -315,6 +326,20 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 			for _, target := range []string{cleaned, literal} {
 				targets[target] = targets[target] || always
 			}
+			if always {
+				required = append(required, [2]string{cleaned, literal})
+			}
+		}
+	}
+	// A core part a relationship names must exist under one of its resolutions.
+	present := map[string]bool{}
+	for _, entry := range p.archive.File {
+		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
+		present[normalized], present[path.Clean(normalized)] = true, true
+	}
+	for _, target := range required {
+		if !present[target[0]] && !present[target[1]] {
+			return nil, fmt.Errorf("%w: missing part %s", convert.ErrCorrupt, target[0])
 		}
 	}
 	var names []string
