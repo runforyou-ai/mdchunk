@@ -11,3 +11,6 @@
   charset and fallback decoding.
 - Package `convert/html`: HTML to CommonMark with GFM tables, `<meta>` charset
   detection, header promotion and relative link resolution.
+- Packages `convert/docx` and `convert/pptx`: Word and PowerPoint documents,
+  with one section per slide, chart data as tables and encrypted or legacy
+  files reported as `ErrEncrypted` and `ErrUnsupported`.
