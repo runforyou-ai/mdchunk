@@ -34,6 +34,7 @@ func document(t *testing.T, body string) []byte {
 <w:style w:type="paragraph" w:styleId="LinkedOverride"><w:name w:val="Linked override"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="ChainMiddle"><w:name w:val="Chain middle"/><w:basedOn w:val="ListNumber"/></w:style>
 <w:style w:type="paragraph" w:styleId="ChainChild"><w:name w:val="Chain child"/><w:basedOn w:val="ChainMiddle"/></w:style>
+<w:style w:type="paragraph" w:styleId="LevelOverLink"><w:name w:val="Level over link"/><w:basedOn w:val="Linked"/><w:pPr><w:numPr><w:ilvl w:val="0"/></w:numPr></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="LevelOnly"><w:name w:val="Level only"/><w:basedOn w:val="ListNumber"/><w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr></w:pPr></w:style>
 </w:styles>`,
 		"word/numbering.xml": `<w:numbering ` + ns + `>
@@ -110,12 +111,13 @@ func TestNumberingInheritance(t *testing.T) {
 		p(`<w:pStyle w:val="H2"/><w:outlineLvl w:val="9"/>`, "body paragraph") +
 		p(`<w:pStyle w:val="LinkedOverride"/>`, "linked wins") +
 		p(`<w:pStyle w:val="LevelOnly"/>`, "derived level") +
-		p(`<w:pStyle w:val="ChainChild"/>`, "middle link")
+		p(`<w:pStyle w:val="ChainChild"/>`, "middle link") +
+		p(`<w:pStyle w:val="LevelOverLink"/>`, "own level wins")
 	doc, err := convertData(t, document(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "   - level from paragraph\n\n1. based on\n\n      1. linked level\n\n- override\n\n## inherited heading\n\nbody style\n\nbody paragraph\n\n         - linked wins\n\n   - derived level\n\n            1. middle link"
+	want := "   - level from paragraph\n\n1. based on\n\n      1. linked level\n\n- override\n\n## inherited heading\n\nbody style\n\nbody paragraph\n\n         - linked wins\n\n   - derived level\n\n            1. middle link\n\n1. own level wins"
 	if doc.Markdown != want {
 		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
 	}
