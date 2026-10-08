@@ -317,7 +317,7 @@ func clone(n *xhtml.Node) *xhtml.Node {
 }
 
 // escapeCodePipes escapes '|' in inline code within a cell, which GFM tables
-// require. Nested tables were prepared on their own and are skipped.
+// require.
 func escapeCodePipes(cell *xhtml.Node) {
 	var walk func(n *xhtml.Node, inCode bool)
 	walk = func(n *xhtml.Node, inCode bool) {
@@ -326,9 +326,7 @@ func escapeCodePipes(cell *xhtml.Node) {
 		}
 		inCode = inCode || inlineCode[n.DataAtom]
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			if child.DataAtom != atom.Table {
-				walk(child, inCode)
-			}
+			walk(child, inCode)
 		}
 	}
 	walk(cell, false)

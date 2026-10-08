@@ -120,7 +120,8 @@ func TestHugeSpans(t *testing.T) {
 
 func TestExpansionBudgetIsExact(t *testing.T) {
 	src := `<table><tr><th>a</th><th>b</th><th>c</th></tr><tr><td colspan=3>x</td></tr></table>`
-	// The spanned cell (td and text node, 2 bytes of attribute and data) is copied twice.
+	// The spanned cell is copied twice: two nodes (td and its text) at 64 each, plus
+	// 16 per byte of "colspan", "3", "td" and "x".
 	cost := int64(2 * (2*64 + (len("colspan")+len("3")+len("td")+len("x"))*16))
 	if _, err := html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: cost}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); err != nil {
 		t.Errorf("at the budget: %v", err)
