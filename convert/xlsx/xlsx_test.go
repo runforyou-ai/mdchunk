@@ -232,6 +232,21 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(twice.Bytes())}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("duplicate sheet: %v", err)
 	}
+	// With the relationship part itself named with backslashes, its references still count.
+	for _, part := range []string{"xl/sharedStrings.xml", "xl/styles.xml", "xl/theme/theme1.xml"} {
+		missing := rezipAll(t, data, func(entry, content string) (string, string) {
+			switch entry {
+			case "xl/_rels/workbook.xml.rels":
+				return `xl\_rels\workbook.xml.rels`, content
+			case part:
+				return "unused/" + entry, content
+			}
+			return entry, content
+		})
+		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(missing)}); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("backslash relationships, missing %s: %v", part, err)
+		}
+	}
 	for name, rename := range map[string]func(string) string{
 		"directory entry": func(n string) string { return n + "/" },
 		"moved elsewhere": func(n string) string { return "unused/" + n },
