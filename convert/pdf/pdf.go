@@ -164,10 +164,10 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 
 // line is a line of text on a page in PDF points, y axis pointing up.
 type line struct {
-	page                     int
-	text                     string
-	size                     float64
-	left, right, top, bottom float64
+	page        int
+	text        string
+	size        float64
+	top, bottom float64
 }
 
 // extract reads the text lines of every page and the page count.
@@ -214,7 +214,7 @@ func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, e
 }
 
 // appendChars groups a page's characters into lines following PDFium's text
-// order: the CRLF pairs PDFium generates end lines, the spaces it generates or
+// order: CRLF pairs in the character stream end lines, the spaces it generates or
 // reads separate words, and other control characters count as spaces. Each
 // character is read once. A line's font size is the size of most of its
 // characters and its box encloses theirs.
@@ -253,7 +253,7 @@ func appendChars(lines []line, page int, chars []*responses.GetPageTextStructure
 		}
 		position := char.PointPosition
 		if !open {
-			lines = append(lines, line{page: page, left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
+			lines = append(lines, line{page: page, top: position.Top, bottom: position.Bottom})
 			text, open, space = text[:0], true, false
 		}
 		l := &lines[len(lines)-1]
@@ -263,7 +263,6 @@ func appendChars(lines []line, page int, chars []*responses.GetPageTextStructure
 		}
 		text = append(text, char.Text...)
 		weights[size]++
-		l.left, l.right = min(l.left, position.Left), max(l.right, position.Right)
 		l.top, l.bottom = max(l.top, position.Top), min(l.bottom, position.Bottom)
 	}
 	finish()
