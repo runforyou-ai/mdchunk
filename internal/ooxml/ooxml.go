@@ -3,7 +3,9 @@ package ooxml
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -22,6 +24,9 @@ var relationshipNamespaces = map[string]bool{
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships": true,
 	"http://purl.oclc.org/ooxml/officeDocument/relationships":             true,
 }
+
+// utf8BOM may start an XML part.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // oleMagic starts a Compound File Binary, used by encrypted OOXML and legacy Office formats.
 var oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
@@ -83,7 +88,8 @@ type Package struct {
 
 // Open opens data as an OOXML package. maxExpanded < 0 means unlimited.
 // Encrypted documents return convert.ErrEncrypted, legacy binary Office files
-// convert.ErrUnsupported and anything else that is not a zip convert.ErrCorrupt.
+// convert.ErrUnsupported, and anything else that is not a zip, or holds two
+// entries whose names differ only in case or separators, convert.ErrCorrupt.
 func Open(data []byte, maxExpanded int64) (*Package, error) {
 	if bytes.HasPrefix(data, oleMagic) {
 		if bytes.Contains(data, encryptionInfo) {
@@ -94,6 +100,15 @@ func Open(data []byte, maxExpanded int64) (*Package, error) {
 	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
+	}
+	// Readers disagree on which of two same-named entries wins, so duplicates are damage.
+	names := map[string]bool{}
+	for _, entry := range archive.File {
+		name := strings.ToLower(strings.ReplaceAll(entry.Name, `\`, "/"))
+		if names[name] {
+			return nil, fmt.Errorf("%w: duplicate part %s", convert.ErrCorrupt, entry.Name)
+		}
+		names[name] = true
 	}
 	return &Package{archive: archive, max: maxExpanded, remaining: maxExpanded}, nil
 }
@@ -106,6 +121,11 @@ func (p *Package) Files() []*zip.File {
 // ReadPart parses the XML part at name, or returns nil when it is missing.
 // Reads count against the expansion limit.
 func (p *Package) ReadPart(name string) (*Node, error) {
+	return p.readPart(name, true)
+}
+
+// readPart parses the XML part at name; counted reads count against the expansion limit.
+func (p *Package) readPart(name string, counted bool) (*Node, error) {
 	file, err := p.archive.Open(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -116,7 +136,7 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 	defer func() { _ = file.Close() }()
 	var reader io.Reader = file
 	var limited *io.LimitedReader
-	if p.max >= 0 && p.remaining < math.MaxInt64 {
+	if counted && p.max >= 0 && p.remaining < math.MaxInt64 {
 		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
 		reader = limited
 		defer func() { p.remaining = max(limited.N-1, 0) }()
@@ -155,6 +175,225 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 		case xml.CharData:
 			stack[len(stack)-1].Text += string(token)
 		}
+	}
+}
+
+// CheckXML reads the XML part at name to its end without keeping it and
+// returns convert.ErrCorrupt when it is not well-formed: mismatched or
+// unclosed elements, other than one root element, or text outside it. Reads count against
+// the expansion limit; cancellation is checked between tokens in batches.
+func (p *Package) CheckXML(ctx context.Context, name string) error {
+	file, err := p.archive.Open(name)
+	if err != nil {
+		return fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
+	}
+	defer func() { _ = file.Close() }()
+	var reader io.Reader = file
+	var limited *io.LimitedReader
+	if p.max >= 0 && p.remaining < math.MaxInt64 {
+		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
+		reader = limited
+		defer func() { p.remaining = max(limited.N-1, 0) }()
+	}
+	decoder := xml.NewDecoder(reader)
+	depth, roots := 0, 0
+	for count := 0; ; count++ {
+		if count%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		token, err := decoder.Token()
+		if limited != nil && limited.N == 0 {
+			return &convert.LimitError{Limit: convert.LimitExpanded, Max: p.max}
+		}
+		if errors.Is(err, io.EOF) {
+			if roots != 1 {
+				return fmt.Errorf("%w: %s has %d root elements", convert.ErrCorrupt, name, roots)
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %s: %w", convert.ErrCorrupt, name, err)
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				roots++
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && roots == 0 {
+				token = bytes.TrimPrefix(token, utf8BOM)
+			}
+			if depth == 0 && len(bytes.TrimSpace(token)) > 0 {
+				return fmt.Errorf("%w: %s has text outside its root element", convert.ErrCorrupt, name)
+			}
+		}
+	}
+}
+
+// xmlRelationships are relationship types whose targets readers parse as
+// XML content; their targets are always checked.
+var xmlRelationships = map[string]bool{
+	"officeDocument": true, "worksheet": true, "sharedStrings": true, "styles": true, "theme": true,
+}
+
+// caseInsensitiveParts are parts readers find whatever the case of their name.
+var caseInsensitiveParts = map[string]bool{"xl/sharedstrings.xml": true}
+
+// fixedXMLParts are parts readers load from fixed paths, compared case-insensitively;
+// they are always checked when present.
+var fixedXMLParts = map[string]bool{
+	"xl/workbook.xml": true, "xl/sharedstrings.xml": true, "xl/styles.xml": true, "xl/theme/theme1.xml": true,
+	"word/document.xml": true, "word/styles.xml": true, "word/numbering.xml": true, "ppt/presentation.xml": true,
+}
+
+// XMLParts returns the parts to check as XML: those [Content_Types].xml
+// declares as XML, by part name or extension, parts readers load from fixed
+// paths, targets of relationships whose content readers parse as XML, and
+// other relationship targets whose content starts like XML. The check guards
+// against damaged files; a package crafted so that a reader resolves a part
+// differently can still convert to less text, as a file holding less text
+// would. Targets are resolved as readers resolve them, with
+// backslashes as slashes and dot segments removed. [Content_Types].xml is
+// checked strictly here and counted once; parts that cannot be opened are left
+// to the reader that needs them.
+func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
+	const contentTypes = "[Content_Types].xml"
+	if file, err := p.archive.Open(contentTypes); err == nil {
+		_ = file.Close()
+		if err := p.CheckXML(ctx, contentTypes); err != nil {
+			return nil, err
+		}
+	}
+	types, err := p.readPart(contentTypes, false)
+	if err != nil {
+		return nil, err
+	}
+	isXML := func(contentType string) bool {
+		contentType = strings.ToLower(strings.TrimSpace(contentType))
+		return strings.HasSuffix(contentType, "+xml") || strings.HasSuffix(contentType, "/xml")
+	}
+	defaults, overrides := map[string]bool{}, map[string]bool{}
+	for _, item := range types.Child("Types").Elements() {
+		switch item.Name {
+		case "Default":
+			defaults[strings.ToLower(item.Attr("Extension"))] = isXML(item.Attr("ContentType"))
+		case "Override":
+			overrides[strings.ToLower(strings.TrimPrefix(item.Attr("PartName"), "/"))] = isXML(item.Attr("ContentType"))
+		}
+	}
+	declared := func(name string) bool {
+		lower := strings.ToLower(name)
+		if xmlPart, ok := overrides[lower]; ok {
+			return xmlPart
+		}
+		return defaults[strings.TrimPrefix(path.Ext(lower), ".")]
+	}
+	// Relationship targets are found from relationship parts read without counting;
+	// those parts are XML and are checked, and counted, like any other.
+	targets := map[string]bool{} // target -> always checked
+	var required [][2]string     // both resolutions of each core relationship target
+	for _, entry := range p.archive.File {
+		name := strings.ReplaceAll(entry.Name, `\`, "/")
+		if !strings.HasSuffix(name, ".rels") {
+			continue
+		}
+		root, err := p.readPart(name, false)
+		if err != nil {
+			return nil, err
+		}
+		base := path.Dir(path.Dir(name))
+		for _, item := range root.Child("Relationships").Elements() {
+			if item.Attr("TargetMode") == "External" {
+				continue
+			}
+			// Readers differ in whether backslashes become slashes before or after dot
+			// segments are removed, so both resolutions are recorded.
+			raw := item.Attr("Target")
+			always := xmlRelationships[path.Base(item.Attr("Type"))]
+			cleaned := strings.ReplaceAll(raw, `\`, "/")
+			if strings.HasPrefix(cleaned, "/") {
+				cleaned = strings.TrimPrefix(path.Clean(cleaned), "/")
+			} else {
+				cleaned = path.Join(base, cleaned)
+			}
+			literal := strings.ReplaceAll(path.Clean(raw), `\`, "/")
+			if strings.HasPrefix(literal, "/") {
+				literal = strings.TrimPrefix(literal, "/")
+			} else if base != "." {
+				literal = base + "/" + literal
+			}
+			for _, target := range []string{cleaned, literal} {
+				targets[target] = targets[target] || always
+			}
+			if always {
+				required = append(required, [2]string{cleaned, literal})
+			}
+		}
+	}
+	// A core part a relationship names must exist as a file under one of its
+	// resolutions; shared strings are matched without regard to case, as
+	// readers match them.
+	present, folded := map[string]bool{}, map[string]bool{}
+	for _, entry := range p.archive.File {
+		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
+		if strings.HasSuffix(normalized, "/") {
+			continue
+		}
+		present[normalized], folded[strings.ToLower(normalized)] = true, true
+	}
+	exists := func(name string) bool {
+		return present[name] || caseInsensitiveParts[strings.ToLower(name)] && folded[strings.ToLower(name)]
+	}
+	for _, target := range required {
+		if !exists(target[0]) && !exists(target[1]) {
+			return nil, fmt.Errorf("%w: missing part %s", convert.ErrCorrupt, target[0])
+		}
+	}
+	var names []string
+	for _, entry := range p.archive.File {
+		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
+		if normalized == contentTypes || strings.HasSuffix(normalized, "/") {
+			continue
+		}
+		always, targeted := targets[normalized]
+		if !targeted {
+			always, targeted = targets[path.Clean(normalized)]
+		}
+		always = always || fixedXMLParts[strings.ToLower(normalized)]
+		if declared(entry.Name) || strings.HasSuffix(entry.Name, ".rels") || always || targeted && looksLikeXML(entry) {
+			names = append(names, normalized)
+		}
+	}
+	return names, nil
+}
+
+// looksLikeXML reports whether an entry's content starts with "<" after an
+// optional BOM and any amount of whitespace.
+func looksLikeXML(entry *zip.File) bool {
+	file, err := entry.Open()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }()
+	reader := bufio.NewReader(file)
+	if head, err := reader.Peek(len(utf8BOM)); err == nil && bytes.Equal(head, utf8BOM) {
+		_, _ = reader.Discard(len(utf8BOM))
+	}
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return false
+		}
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		return b == '<'
 	}
 }
 
