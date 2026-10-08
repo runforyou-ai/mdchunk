@@ -37,13 +37,11 @@ import (
 
 // Heading detection: a heading line's font is at least headingScale times the
 // body size and it has at most headingMaxRunes runes; sizes beyond
-// headingLevels map to the lowest level. wideRune starts the CJK ranges, whose
-// text blocks join without a space.
+// headingLevels map to the lowest level.
 const (
 	headingScale    = 1.15
 	headingMaxRunes = 60
 	headingLevels   = 3
-	wideRune        = '\u2e80'
 )
 
 // Options configures the PDF converter. The zero value is the default.
@@ -172,11 +170,6 @@ type line struct {
 	left, right, top, bottom float64
 }
 
-// height returns the line's height in points.
-func (l line) height() float64 {
-	return l.top - l.bottom
-}
-
 // extract reads the text lines of every page and the page count.
 func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, error) {
 	instance, err := pool.GetInstanceWithContext(ctx)
@@ -220,18 +213,17 @@ func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, e
 	return lines, count.PageCount, nil
 }
 
-// appendChars groups a page's characters, in PDFium's text order, into lines.
-// Each character is read once; control characters count as spaces. A
-// character joins the current line when its box overlaps the line's
-// vertically and it does not move back to the left.
-// A line's font size is the size of most of its characters.
+// appendChars groups a page's characters into lines following PDFium's text
+// order: the CRLF pairs PDFium generates end lines, the spaces it generates or
+// reads separate words, and other control characters count as spaces. Each
+// character is read once. A line's font size is the size of most of its
+// characters and its box encloses theirs.
 func appendChars(lines []line, page int, chars []*responses.GetPageTextStructuredChar) []line {
-	first := len(lines)
 	weights := map[float64]int{}
 	var text []byte
-	var last rune
+	open, space := false, false
 	finish := func() {
-		if len(lines) == first {
+		if !open {
 			return
 		}
 		l := &lines[len(lines)-1]
@@ -243,12 +235,16 @@ func appendChars(lines []line, page int, chars []*responses.GetPageTextStructure
 			}
 		}
 		clear(weights)
+		open = false
 	}
-	space := false
-	for _, char := range chars {
+	for i, char := range chars {
+		if char.Text == "\r" && i+1 < len(chars) && chars[i+1].Text == "\n" {
+			finish()
+			continue
+		}
 		r, _ := utf8.DecodeRuneInString(char.Text)
 		if char.Text == "" || unicode.IsSpace(r) || unicode.IsControl(r) {
-			space = space || len(lines) > first
+			space = space || open
 			continue
 		}
 		size := 0.0
@@ -256,38 +252,22 @@ func appendChars(lines []line, page int, chars []*responses.GetPageTextStructure
 			size = char.FontInformation.RenderedSize
 		}
 		position := char.PointPosition
-		current := len(lines) - 1
-		if current >= first {
-			l := &lines[current]
-			overlap := min(position.Top, l.top) - max(position.Bottom, l.bottom)
-			sameLine := overlap > 0 && position.Left >= l.right-max(size, l.height())*2
-			if sameLine {
-				// A gap between characters reads as a space unless either side is CJK.
-				gap := position.Left-l.right > max(size, l.height())*0.2 && last < wideRune && r < wideRune
-				if (space || gap) && last != ' ' {
-					text = append(text, ' ')
-				}
-				text = append(text, char.Text...)
-				last, space = lastRune(char.Text), false
-				weights[size]++
-				l.right, l.top, l.bottom = max(l.right, position.Right), max(l.top, position.Top), min(l.bottom, position.Bottom)
-				continue
-			}
+		if !open {
+			lines = append(lines, line{page: page, left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
+			text, open, space = text[:0], true, false
 		}
-		finish()
-		lines = append(lines, line{page: page, left: position.Left, right: position.Right, top: position.Top, bottom: position.Bottom})
-		text = append(text[:0:0], char.Text...)
-		last, space = lastRune(char.Text), false
+		l := &lines[len(lines)-1]
+		if space {
+			text = append(text, ' ')
+			space = false
+		}
+		text = append(text, char.Text...)
 		weights[size]++
+		l.left, l.right = min(l.left, position.Left), max(l.right, position.Right)
+		l.top, l.bottom = max(l.top, position.Top), min(l.bottom, position.Bottom)
 	}
 	finish()
 	return lines
-}
-
-// lastRune returns the last rune of s.
-func lastRune(s string) rune {
-	r, _ := utf8.DecodeLastRuneInString(s)
-	return r
 }
 
 // render writes lines as Markdown with one section per page.

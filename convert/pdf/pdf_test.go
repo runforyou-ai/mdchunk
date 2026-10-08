@@ -177,9 +177,12 @@ func TestLayout(t *testing.T) {
 		lines []text
 		want  string
 	}{
-		"same line":    {[]text{{12, 700, "Hello", 0}, {12, 700, "world", 110}}, "Hello world"},
-		"overlapping":  {[]text{{12, 700, "above", 0}, {12, 697, "below", 0}}, "above\nbelow"},
-		"continuation": {[]text{{24, 700, "Line one", 0}, {24, 676, "Line two", 0}, body}, "# Line one Line two\n\n" + body.s},
+		"same line":          {[]text{{12, 700, "Hello", 0}, {12, 700, "world", 110}}, "Hello world"},
+		"overlapping":        {[]text{{12, 700, "above", 0}, {12, 697, "below", 0}}, "above below"},
+		"underscore":         {[]text{{12, 700, "foo_bar baz", 0}}, "foo_bar baz"},
+		"decimal":            {[]text{{12, 700, "Value 1.23 in file.txt", 0}}, "Value 1.23 in file.txt"},
+		"heading underscore": {[]text{{24, 700, "snake_case names", 0}, body}, "# snake_case names\n\n" + body.s},
+		"continuation":       {[]text{{24, 700, "Line one", 0}, {24, 676, "Line two", 0}, body}, "# Line one Line two\n\n" + body.s},
 		"levels": {[]text{{30, 740, "Alpha", 0}, {24, 700, "Beta", 0}, {18, 660, "Gamma", 0}, {14, 630, "Delta", 0}, body},
 			"# Alpha\n\n## Beta\n\n### Gamma\n\n### Delta\n\n" + body.s},
 		"embedded newline":    {[]text{{24, 700, `Title\n# hidden`, 0}, body}, "# Title # hidden\n\n" + body.s},
@@ -306,7 +309,6 @@ func TestLifecycle(t *testing.T) {
 		_, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
 		waiting <- err
 	}()
-	time.Sleep(50 * time.Millisecond)
 	closed := make(chan error, 1)
 	go func() { closed <- c.Close() }()
 	if err := <-waiting; !errors.Is(err, convert.ErrClosed) {
