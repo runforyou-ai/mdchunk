@@ -57,6 +57,8 @@ version and the latest stable release.
 | `internal/textdecode` | BOM, declared charset, fallback decoding | `golang.org/x/text` |
 | `internal/ooxml` | OOXML package reading with expansion limits | none |
 | `internal/mdwrite` | Markdown escaping, tables, fences, output limits | none |
+| `internal/source` | reading input under the source limit | none |
+| `internal/ooxmltest`, `internal/pdftest` | building test documents | none |
 
 Only imported packages are compiled, so importing `split` or `convert` pulls
 in no third-party code. The comparison benchmark against other splitters lives
@@ -355,7 +357,7 @@ Every built-in package exports `Options` and a constructor taking it by value;
 the zero value is the default configuration. `Options` embeds `convert.Limits`.
 Packages that decode text (text, HTML, CSV) also have
 `Fallback encoding.Encoding`. `all.Options` has one field per built-in package
-holding that package's `Options`.
+holding that package's `Options`, plus shared `Limits` and `Fallback`.
 
 ### Text decoding
 
@@ -423,9 +425,11 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   Documents that need a password to open return `ErrEncrypted`; documents
   restricted only by an owner password convert normally, and permission flags
   are not checked.
-- `convert/all`: `all.New(opts) (*all.Registry, error)`. Embeds
-  `*convert.Registry` with every format above registered, and `Close` releases
-  the converters it created (the PDF pool), not ones registered later.
+- `convert/all`: `all.New(opts) *all.Registry`. Embeds `*convert.Registry`
+  with every format above registered, and `Close` releases the converters it
+  created (the PDF pool), not ones registered later. `all.Options` also has
+  shared `Limits`, applied field by field to each converter whose own field is
+  zero, and a shared `Fallback` for converters whose own is nil.
 
 ### Lifecycle of `pdf.Converter`
 

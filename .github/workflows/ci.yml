@@ -35,6 +35,9 @@ jobs:
         with:
           go-version: stable
       - run: go vet ./...
+      - name: Vet bench module
+        run: go vet ./...
+        working-directory: bench
       - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.14.0
