@@ -404,7 +404,13 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
 - `convert/xlsx`: `xlsx.New(opts)`. One `KindSheet` section per sheet with the
   sheet name as a level-2 heading and a table; empty rows skipped. Displayed
   (number-formatted) values by default, `RawValues` for stored values;
-  `IncludeHidden` option.
+  `IncludeHidden` option. Before the spreadsheet library reads the package,
+  every XML part it may read is checked: parts declared as XML, parts it loads
+  from fixed paths, targets of core relationships (resolved both ways the
+  library may resolve them) and other targets that start like XML. The check
+  guards against damaged files; a package crafted so that the library resolves
+  a part differently can still convert to less text, as a file holding less
+  text would.
 - `convert/pdf`: `pdf.New(opts)` returns `*pdf.Converter` with `Close() error`.
   One `KindPage` section per page. Text lines are grouped by font size: the
   dominant size is body text, larger short lines become headings

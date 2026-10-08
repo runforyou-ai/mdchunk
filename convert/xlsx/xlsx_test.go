@@ -196,6 +196,35 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 			t.Errorf("renamed sheet with %s: %v", name, err)
 		}
 	}
+	// Backslashes and dot segments resolved after cleaning, as the spreadsheet library does.
+	mixed := rezipAll(t, data, func(name, content string) (string, string) {
+		switch name {
+		case "xl/worksheets/sheet1.xml":
+			return "xl/worksheets/../worksheets/data.bin", "garbage"
+		case "xl/_rels/workbook.xml.rels":
+			return name, strings.ReplaceAll(content, "worksheets/sheet1.xml", `worksheets\..\worksheets\data.bin`)
+		}
+		return name, content
+	})
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(mixed)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("mixed separators and dot segments: %v", err)
+	}
+	// Shared strings are read from a fixed path, without a relationship or an XML content type.
+	unlisted := rezipAll(t, data, func(name, content string) (string, string) {
+		switch name {
+		case "xl/sharedStrings.xml":
+			return name, "garbage"
+		case "xl/_rels/workbook.xml.rels":
+			before, _, _ := strings.Cut(content, "<Relationship Id=\"rId4\"")
+			return name, before + "</Relationships>"
+		case "[Content_Types].xml":
+			return name, strings.ReplaceAll(content, "sharedStrings+xml", "octet-stream")
+		}
+		return name, content
+	})
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(unlisted)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("unlisted shared strings: %v", err)
+	}
 	for name, edit := range map[string]func(string) string{
 		"extra root": func(s string) string { return s + "<extra/>" },
 		"text":       func(s string) string { return s + "garbage" },

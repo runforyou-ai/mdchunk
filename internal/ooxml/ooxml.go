@@ -231,10 +231,20 @@ var xmlRelationships = map[string]bool{
 	"officeDocument": true, "worksheet": true, "sharedStrings": true, "styles": true, "theme": true,
 }
 
+// fixedXMLParts are parts readers load from fixed paths, compared case-insensitively;
+// they are always checked when present.
+var fixedXMLParts = map[string]bool{
+	"xl/workbook.xml": true, "xl/sharedstrings.xml": true, "xl/styles.xml": true, "xl/theme/theme1.xml": true,
+	"word/document.xml": true, "word/styles.xml": true, "word/numbering.xml": true, "ppt/presentation.xml": true,
+}
+
 // XMLParts returns the parts to check as XML: those [Content_Types].xml
-// declares as XML, by part name or extension, targets of relationships whose
-// content readers parse as XML, and other relationship targets whose content
-// starts like XML. Targets are resolved as readers resolve them, with
+// declares as XML, by part name or extension, parts readers load from fixed
+// paths, targets of relationships whose content readers parse as XML, and
+// other relationship targets whose content starts like XML. The check guards
+// against damaged files; a package crafted so that a reader resolves a part
+// differently can still convert to less text, as a file holding less text
+// would. Targets are resolved as readers resolve them, with
 // backslashes as slashes and dot segments removed. [Content_Types].xml is
 // checked strictly here and counted once; parts that cannot be opened are left
 // to the reader that needs them.
@@ -281,18 +291,30 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		base := path.Dir(path.Dir(entry.Name))
+		base := path.Dir(path.Dir(strings.ReplaceAll(entry.Name, `\`, "/")))
 		for _, item := range root.Child("Relationships").Elements() {
 			if item.Attr("TargetMode") == "External" {
 				continue
 			}
-			target := strings.ReplaceAll(item.Attr("Target"), `\`, "/")
-			if strings.HasPrefix(target, "/") {
-				target = strings.TrimPrefix(path.Clean(target), "/")
+			// Readers differ in whether backslashes become slashes before or after dot
+			// segments are removed, so both resolutions are recorded.
+			raw := item.Attr("Target")
+			always := xmlRelationships[path.Base(item.Attr("Type"))]
+			cleaned := strings.ReplaceAll(raw, `\`, "/")
+			if strings.HasPrefix(cleaned, "/") {
+				cleaned = strings.TrimPrefix(path.Clean(cleaned), "/")
 			} else {
-				target = path.Join(base, target)
+				cleaned = path.Join(base, cleaned)
 			}
-			targets[target] = targets[target] || xmlRelationships[path.Base(item.Attr("Type"))]
+			literal := strings.ReplaceAll(path.Clean(raw), `\`, "/")
+			if strings.HasPrefix(literal, "/") {
+				literal = strings.TrimPrefix(literal, "/")
+			} else if base != "." {
+				literal = base + "/" + literal
+			}
+			for _, target := range []string{cleaned, literal} {
+				targets[target] = targets[target] || always
+			}
 		}
 	}
 	var names []string
@@ -300,7 +322,12 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 		if entry.Name == contentTypes || strings.HasSuffix(entry.Name, "/") {
 			continue
 		}
-		always, targeted := targets[strings.ReplaceAll(entry.Name, `\`, "/")]
+		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
+		always, targeted := targets[normalized]
+		if !targeted {
+			always, targeted = targets[path.Clean(normalized)]
+		}
+		always = always || fixedXMLParts[strings.ToLower(normalized)]
 		if declared(entry.Name) || strings.HasSuffix(entry.Name, ".rels") || always || targeted && looksLikeXML(entry) {
 			names = append(names, entry.Name)
 		}
