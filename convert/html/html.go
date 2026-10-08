@@ -5,7 +5,7 @@
 // UTF-8 or Options.Fallback. Tables, innermost first, are expanded to
 // rectangular grids before conversion: spans (clamped to the HTML standard's
 // limits and kept within their row group) repeat their cell, short rows are
-// padded, and a lower bound of the expanded size must fit the output limit. A
+// padded, and the copies must fit Limits.MaxExpandedBytes. A
 // table without header cells promotes its first row, and relative links
 // resolve against Input.BaseURL.
 package html
@@ -77,7 +77,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
-	if err := prepareTables(doc, limits); err != nil {
+	if err := prepareTables(doc, limits.MaxExpandedBytes, in.BaseURL); err != nil {
 		return convert.Document{}, err
 	}
 	options := []converter.ConvertOptionFunc{converter.WithContext(ctx)}

@@ -1,9 +1,7 @@
 package html
 
 import (
-	"errors"
 	"strings"
-	"unicode"
 
 	xhtml "golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -17,30 +15,25 @@ const (
 	maxRowspan = 65534
 )
 
-// cellOverhead is the least Markdown a table cell renders to besides its
-// content: a space, the content, a space and a pipe.
-const cellOverhead = 3
-
-// nodeBytes is what copying one node is assumed to cost against the expansion limit.
-const nodeBytes = 64
-
-// silent are elements whose text the converter drops.
-var silent = map[atom.Atom]bool{atom.Script: true, atom.Style: true, atom.Template: true, atom.Noscript: true}
-
-// shownAttributes are attributes whose values appear in the Markdown.
-var shownAttributes = map[string]bool{"href": true, "src": true, "alt": true, "title": true}
+// Copies made by table expansion are charged in memory terms: nodeBytes per
+// copied node and textWeight per byte of copied text or attribute, roughly
+// what converting the copy costs.
+const (
+	nodeBytes  = 64
+	textWeight = 16
+)
 
 // inlineCode are the elements the converter renders as inline code.
 var inlineCode = map[atom.Atom]bool{atom.Code: true, atom.Var: true, atom.Samp: true, atom.Kbd: true, atom.Tt: true}
 
 // prepareTables expands every table, innermost first, into a rectangular grid
 // without spans and escapes pipes inside inline code in cells. Before a table
-// is expanded, a lower bound of its rendered size is checked against what is
-// left of limits.MaxOutputBytes, and the copies it makes against what is left
-// of limits.MaxExpandedBytes; a table that cannot fit returns a
-// *convert.LimitError.
-func prepareTables(doc *xhtml.Node, limits convert.Limits) error {
-	output, expanded := limits.MaxOutputBytes, limits.MaxExpandedBytes
+// is expanded, the copies it would make are charged against what is left of
+// maxExpanded (negative means unlimited); a table that does not fit returns
+// an expanded *convert.LimitError. Link and image addresses are charged with
+// baseURL, which they resolve against.
+func prepareTables(doc *xhtml.Node, maxExpanded int64, baseURL string) error {
+	budget := maxExpanded
 	var tables []*xhtml.Node
 	var walk func(*xhtml.Node)
 	walk = func(n *xhtml.Node) {
@@ -53,28 +46,16 @@ func prepareTables(doc *xhtml.Node, limits convert.Limits) error {
 	}
 	walk(doc)
 	for _, table := range tables {
-		size, copies, err := expandTable(table, output, expanded)
-		switch {
-		case errors.Is(err, errOutput):
-			return &convert.LimitError{Limit: convert.LimitOutput, Max: limits.MaxOutputBytes}
-		case errors.Is(err, errExpanded):
-			return &convert.LimitError{Limit: convert.LimitExpanded, Max: limits.MaxExpandedBytes}
+		cost, ok := expandTable(table, budget, int64(len(baseURL)))
+		if !ok {
+			return &convert.LimitError{Limit: convert.LimitExpanded, Max: maxExpanded}
 		}
-		if output >= 0 {
-			output -= size
-		}
-		if expanded >= 0 {
-			expanded -= copies
+		if budget >= 0 {
+			budget -= cost
 		}
 	}
 	return nil
 }
-
-// Budget errors of expandTable.
-var (
-	errOutput   = errors.New("table output exceeds the budget")
-	errExpanded = errors.New("table copies exceed the budget")
-)
 
 // row is a table row and the index of the last row in its row group.
 type row struct {
@@ -83,28 +64,25 @@ type row struct {
 }
 
 // expandTable rewrites the rows of table so each holds one cell per column,
-// repeating spanned cells. It returns a lower bound of the table's rendered
-// size and the bytes its copies are assumed to take. When either exceeds its
-// budget (negative means unlimited) it returns errOutput or errExpanded and
-// leaves the table unchanged.
-func expandTable(table *xhtml.Node, output, expanded int64) (int64, int64, error) {
+// repeating spanned cells. It returns the cost of the copies, or false when
+// that exceeds budget (negative means unlimited); then the table is unchanged.
+func expandTable(table *xhtml.Node, budget, baseURL int64) (int64, bool) {
 	rows := tableRows(table)
 	if len(rows) == 0 {
-		return 0, 0, nil
+		return 0, true
 	}
-	// Bound the grid and its content before allocating: active widths per row
-	// come from a difference array over the rows each cell spans.
+	// Charge copies before allocating: active widths per row come from a
+	// difference array over the rows each cell spans, and padding cells are
+	// what the widest row leaves.
 	widths := make([]int64, len(rows)+1)
-	var content, copies, area int64
+	var cost, area int64
 	for i, r := range rows {
 		for _, cell := range rowCells(r.node) {
 			colspan, rowspan := spans(cell, r.groupEnd-i+1)
 			widths[i] += int64(colspan)
 			widths[i+rowspan] -= int64(colspan)
-			text, nodes := measureCell(cell)
 			slots := int64(colspan) * int64(rowspan)
-			content += text * slots
-			copies += nodes * nodeBytes * (slots - 1)
+			cost += copyCost(cell, baseURL) * (slots - 1)
 			area += slots
 		}
 	}
@@ -113,13 +91,9 @@ func expandTable(table *xhtml.Node, output, expanded int64) (int64, int64, error
 		active += widths[i]
 		width = max(width, active)
 	}
-	size := content + int64(len(rows))*width*cellOverhead
-	copies += max(int64(len(rows))*width-area, 0) * nodeBytes // padding cells
-	if output >= 0 && size > output {
-		return 0, 0, errOutput
-	}
-	if expanded >= 0 && copies > expanded {
-		return 0, 0, errExpanded
+	cost += max(int64(len(rows))*width-area, 0) * nodeBytes
+	if budget >= 0 && cost > budget {
+		return 0, false
 	}
 
 	grid := make([][]*xhtml.Node, len(rows))
@@ -169,40 +143,28 @@ func expandTable(table *xhtml.Node, output, expanded int64) (int64, int64, error
 			r.node.AppendChild(cell)
 		}
 	}
-	return size, copies, nil
+	return cost, true
 }
 
-// measureCell returns a lower bound of the Markdown a cell's content renders
-// to (its non-whitespace text outside script and style, and the values of
-// link and image attributes) and the number of nodes copying it makes.
-func measureCell(cell *xhtml.Node) (int64, int64) {
-	var text, nodes int64
-	var walk func(n *xhtml.Node, quiet bool)
-	walk = func(n *xhtml.Node, quiet bool) {
-		nodes++
-		switch n.Type {
-		case xhtml.TextNode:
-			if !quiet {
-				for _, r := range n.Data {
-					if !unicode.IsSpace(r) {
-						text++
-					}
-				}
-			}
-		case xhtml.ElementNode:
-			quiet = quiet || silent[n.DataAtom]
-			for _, attr := range n.Attr {
-				if shownAttributes[attr.Key] && !quiet {
-					text += int64(len(strings.TrimSpace(attr.Val)))
-				}
+// copyCost returns what one copy of cell is charged: its nodes, text and
+// attributes, with link and image addresses charged the base URL too.
+func copyCost(cell *xhtml.Node, baseURL int64) int64 {
+	var cost int64
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		cost += nodeBytes + int64(len(n.Data))*textWeight
+		for _, attr := range n.Attr {
+			cost += int64(len(attr.Key)+len(attr.Val)) * textWeight
+			if attr.Key == "href" || attr.Key == "src" {
+				cost += baseURL * textWeight
 			}
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child, quiet)
+			walk(child)
 		}
 	}
-	walk(cell, false)
-	return text, nodes
+	walk(cell)
+	return cost
 }
 
 // tableRows returns the rows of table with their row group ends, including

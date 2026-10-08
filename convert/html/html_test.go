@@ -117,9 +117,15 @@ func TestHugeSpans(t *testing.T) {
 		t.Errorf("sparse rows: %v", err)
 	}
 	href := `<table><tr><td colspan=1000><a href="https://e.com/` + strings.Repeat("p", 8000) + `">l</a></td></tr></table>`
-	_, err = html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 65536}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(href)})
-	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput {
+	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(href)})
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
 		t.Errorf("long link: %v", err)
+	}
+	short := `<table><tr><td colspan=1000><a href="x">l</a></td></tr></table>`
+	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(short), BaseURL: "https://e.com/" + strings.Repeat("b", 8000) + "/"})
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
+		t.Errorf("long base URL: %v", err)
 	}
 	nodes := `<table><tr><td colspan=1000>` + strings.Repeat("<i></i>", 200) + `x</td></tr></table>`
 	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(nodes)})
@@ -132,13 +138,22 @@ func TestHugeSpans(t *testing.T) {
 }
 
 func TestOutputLimitIsExact(t *testing.T) {
-	src := `<table><tr><td>a</td><td>b</td><td>c</td><td>d</td></tr><tr><td>e</td><td>f</td><td>g</td><td>h</td></tr></table>`
-	at := int64(len(run(t, convert.Input{Reader: strings.NewReader(src)})))
-	if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); err != nil {
-		t.Errorf("at the limit: %v", err)
-	}
-	if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at - 1}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); !errors.Is(err, convert.ErrTooLarge) {
-		t.Errorf("one byte over: %v", err)
+	hidden := strings.Repeat("h", 100)
+	for name, src := range map[string]string{
+		"plain":    `<table><tr><td>a</td><td>b</td><td>c</td><td>d</td></tr><tr><td>e</td><td>f</td><td>g</td><td>h</td></tr></table>`,
+		"title":    `<table><tr><td title="` + hidden + `">a</td></tr></table>`,
+		"textarea": `<table><tr><td>a<textarea>` + hidden + `</textarea></td></tr></table>`,
+		"alt":      `<table><tr><td>a<img alt="` + hidden + `"></td></tr></table>`,
+		"template": `<table><tr><td colspan=3>a<template>` + hidden + `</template></td></tr></table>`,
+		"nested":   `<table><tr><td><table><tr><td>` + hidden + `</td></tr></table></td></tr></table>`,
+	} {
+		at := int64(len(run(t, convert.Input{Reader: strings.NewReader(src)})))
+		if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); err != nil {
+			t.Errorf("%s at the limit: %v", name, err)
+		}
+		if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at - 1}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); !errors.Is(err, convert.ErrTooLarge) {
+			t.Errorf("%s one byte over: %v", name, err)
+		}
 	}
 }
 

@@ -378,11 +378,11 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   `+` and overlong numbers parse as browsers do) and kept within their row
   group, repeat their cell; short rows are padded; pipes in inline code
   (`code`, `var`, `samp`, `kbd`, `tt`) inside cells are escaped. Before a table
-  is expanded, a lower bound of its rendered size (visible text, link and
-  image attributes, and three bytes of syntax per grid cell) must fit what is
-  left of the output limit, and the copies (64 bytes per copied node) must fit
-  what is left of `MaxExpandedBytes`; otherwise the conversion fails with the
-  corresponding `LimitError`. A table without header cells promotes its first
+  is expanded, its copies are charged against what is left of
+  `MaxExpandedBytes` in memory terms (64 bytes per copied node and 16 per byte
+  of copied text or attribute, link and image addresses including
+  `Input.BaseURL`), or the conversion fails with an expanded `LimitError`; the
+  output limit applies to the final Markdown. A table without header cells promotes its first
   row; relative links resolve against `Input.BaseURL`. A table whose cells
   contain another table is rendered as text around the inner table, as the
   underlying library does. That library builds the whole output and ignores
