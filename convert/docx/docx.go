@@ -213,22 +213,21 @@ func (d *document) styleHeading(id string) int {
 }
 
 // styleNumbering returns the numbering instance and level a style applies.
-// Along the basedOn chain the nearest numId and the nearest ilvl apply
-// separately; a level linked to the style by the abstract numbering
-// definition replaces the style's ilvl.
+// The nearest numId along the basedOn chain applies. The level is the nearest
+// one along the chain, where a level the abstract numbering definition links
+// to a style replaces that style's own ilvl.
 func (d *document) styleNumbering(id string) (string, string) {
-	numID, ilvl, definer := "", "", ""
-	current := id
-	for range maxStyleChain {
+	var chain []styleInfo
+	var names []string
+	numID := ""
+	for current := id; current != "" && len(chain) < maxStyleChain; {
 		info, ok := d.styles[current]
 		if !ok {
 			break
 		}
-		if numID == "" && info.numID != "" {
-			numID, definer = info.numID, current
-		}
-		if ilvl == "" {
-			ilvl = info.ilvl
+		chain, names = append(chain, info), append(names, current)
+		if numID == "" {
+			numID = info.numID
 		}
 		current = info.basedOn
 	}
@@ -236,10 +235,12 @@ func (d *document) styleNumbering(id string) (string, string) {
 		return "", ""
 	}
 	linked := d.styleLevels[d.numAbstract[numID]]
-	if level := cmp.Or(linked[id], linked[definer]); level != "" {
-		ilvl = level
+	for i, info := range chain {
+		if level := cmp.Or(linked[names[i]], info.ilvl); level != "" {
+			return numID, level
+		}
 	}
-	return numID, ilvl
+	return numID, ""
 }
 
 // blocks renders paragraphs and tables in document order, unwrapping content controls.

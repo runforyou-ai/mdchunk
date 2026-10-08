@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -207,6 +208,28 @@ func TestStrict(t *testing.T) {
 	data := ooxmltest.Build(t, files)
 	if doc := run(t, pptx.Options{}, data); doc.Markdown != "# 严格" {
 		t.Errorf("got %q", doc.Markdown)
+	}
+}
+
+// cancelOnEOF cancels a context when its reader is drained.
+type cancelOnEOF struct {
+	r      io.Reader
+	cancel func()
+}
+
+func (c cancelOnEOF) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		c.cancel()
+	}
+	return n, err
+}
+
+func TestCancelAfterReading(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := pptx.New(pptx.Options{}).Convert(ctx, convert.Input{Reader: cancelOnEOF{bytes.NewReader(deck(t, nil)), cancel}})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v", err)
 	}
 }
 

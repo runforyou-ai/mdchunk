@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -31,10 +32,12 @@ func document(t *testing.T, body string) []byte {
 <w:style w:type="paragraph" w:styleId="SubHeading"><w:name w:val="Sub"/><w:basedOn w:val="H2"/></w:style>
 <w:style w:type="paragraph" w:styleId="NotHeading"><w:name w:val="Body"/><w:basedOn w:val="H2"/><w:pPr><w:outlineLvl w:val="9"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="LinkedOverride"><w:name w:val="Linked override"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="ChainMiddle"><w:name w:val="Chain middle"/><w:basedOn w:val="ListNumber"/></w:style>
+<w:style w:type="paragraph" w:styleId="ChainChild"><w:name w:val="Chain child"/><w:basedOn w:val="ChainMiddle"/></w:style>
 <w:style w:type="paragraph" w:styleId="LevelOnly"><w:name w:val="Level only"/><w:basedOn w:val="ListNumber"/><w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr></w:pPr></w:style>
 </w:styles>`,
 		"word/numbering.xml": `<w:numbering ` + ns + `>
-<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/><w:pStyle w:val="Linked"/></w:lvl><w:lvl w:ilvl="3"><w:numFmt w:val="bullet"/><w:pStyle w:val="LinkedOverride"/></w:lvl></w:abstractNum>
+<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl><w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/><w:pStyle w:val="Linked"/></w:lvl><w:lvl w:ilvl="3"><w:numFmt w:val="bullet"/><w:pStyle w:val="LinkedOverride"/></w:lvl><w:lvl w:ilvl="4"><w:numFmt w:val="decimal"/><w:pStyle w:val="ChainMiddle"/></w:lvl></w:abstractNum>
 <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
 <w:num w:numId="2"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:lvlOverride></w:num>
 </w:numbering>`,
@@ -106,14 +109,37 @@ func TestNumberingInheritance(t *testing.T) {
 		p(`<w:pStyle w:val="NotHeading"/>`, "body style") +
 		p(`<w:pStyle w:val="H2"/><w:outlineLvl w:val="9"/>`, "body paragraph") +
 		p(`<w:pStyle w:val="LinkedOverride"/>`, "linked wins") +
-		p(`<w:pStyle w:val="LevelOnly"/>`, "derived level")
+		p(`<w:pStyle w:val="LevelOnly"/>`, "derived level") +
+		p(`<w:pStyle w:val="ChainChild"/>`, "middle link")
 	doc, err := convertData(t, document(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "   - level from paragraph\n\n1. based on\n\n      1. linked level\n\n- override\n\n## inherited heading\n\nbody style\n\nbody paragraph\n\n         - linked wins\n\n   - derived level"
+	want := "   - level from paragraph\n\n1. based on\n\n      1. linked level\n\n- override\n\n## inherited heading\n\nbody style\n\nbody paragraph\n\n         - linked wins\n\n   - derived level\n\n            1. middle link"
 	if doc.Markdown != want {
 		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
+	}
+}
+
+// cancelOnEOF cancels a context when its reader is drained.
+type cancelOnEOF struct {
+	r      io.Reader
+	cancel func()
+}
+
+func (c cancelOnEOF) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		c.cancel()
+	}
+	return n, err
+}
+
+func TestCancelAfterReading(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := docx.New(docx.Options{}).Convert(ctx, convert.Input{Reader: cancelOnEOF{bytes.NewReader(document(t, "")), cancel}})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v", err)
 	}
 }
 
