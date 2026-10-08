@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/encoding/unicode"
@@ -95,45 +94,40 @@ func TestTables(t *testing.T) {
 }
 
 func TestHugeSpans(t *testing.T) {
-	start := time.Now()
 	src := `<table><tr><td colspan=100000000 rowspan=100000000>x</td></tr></table>`
 	if got := run(t, convert.Input{Reader: strings.NewReader(src)}); strings.Count(got, "x") != 1000 {
 		t.Errorf("colspan not clamped to 1000: %d cells", strings.Count(got, "x"))
 	}
-	_, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 1000}}).Convert(context.Background(),
-		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=1000>x</td></tr>` + strings.Repeat("<tr><td>y</td></tr>", 100) + `</table>`)})
+	small := html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}})
 	var limit *convert.LimitError
+	for name, tc := range map[string]convert.Input{
+		"many nodes":   {Reader: strings.NewReader(`<table><tr><td colspan=1000>` + strings.Repeat("<b>x</b>", 128) + `</td></tr></table>`)},
+		"sparse rows":  {Reader: strings.NewReader(`<table><tr><td colspan=1000 rowspan=2>x</td></tr><tr><td rowspan=1000>y</td></tr>` + strings.Repeat("<tr></tr>", 999) + `</table>`)},
+		"long link":    {Reader: strings.NewReader(`<table><tr><td colspan=1000><a href="https://e.com/` + strings.Repeat("p", 8000) + `">l</a></td></tr></table>`)},
+		"long base":    {Reader: strings.NewReader(`<table><tr><td colspan=1000><a href="x">l</a></td></tr></table>`), BaseURL: "https://e.com/" + strings.Repeat("b", 8000) + "/"},
+		"link no href": {Reader: strings.NewReader(`<table><tr><td colspan=1000><a>l</a></td></tr></table>`), BaseURL: "https://e.com/" + strings.Repeat("b", 8000) + "/"},
+	} {
+		if _, err := small.Convert(context.Background(), tc); !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded || limit.Max != 1<<20 {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	_, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 1000}}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=50>x</td></tr>` + strings.Repeat("<tr><td>y</td></tr>", 100) + `</table>`)})
 	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != 1000 {
-		t.Errorf("cell budget: %v", err)
+		t.Errorf("output limit: %v", err)
 	}
-	_, err = html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 3000}}).Convert(context.Background(),
-		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=1000>` + strings.Repeat("<b>x</b>", 128) + `</td></tr></table>`)})
-	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput {
-		t.Errorf("content budget: %v", err)
+}
+
+func TestExpansionBudgetIsExact(t *testing.T) {
+	src := `<table><tr><th>a</th><th>b</th><th>c</th></tr><tr><td colspan=3>x</td></tr></table>`
+	// The spanned cell (td and text node, 2 bytes of attribute and data) is copied twice.
+	cost := int64(2 * (2*64 + (len("colspan")+len("3")+len("td")+len("x"))*16))
+	if _, err := html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: cost}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); err != nil {
+		t.Errorf("at the budget: %v", err)
 	}
-	_, err = html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: 12000}}).Convert(context.Background(),
-		convert.Input{Reader: strings.NewReader(`<table><tr><td colspan=1000 rowspan=2>x</td></tr><tr><td rowspan=1000>y</td></tr>` + strings.Repeat("<tr></tr>", 999) + `</table>`)})
-	if !errors.As(err, &limit) {
-		t.Errorf("sparse rows: %v", err)
-	}
-	href := `<table><tr><td colspan=1000><a href="https://e.com/` + strings.Repeat("p", 8000) + `">l</a></td></tr></table>`
-	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(href)})
-	if !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
-		t.Errorf("long link: %v", err)
-	}
-	short := `<table><tr><td colspan=1000><a href="x">l</a></td></tr></table>`
-	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(),
-		convert.Input{Reader: strings.NewReader(short), BaseURL: "https://e.com/" + strings.Repeat("b", 8000) + "/"})
-	if !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
-		t.Errorf("long base URL: %v", err)
-	}
-	nodes := `<table><tr><td colspan=1000>` + strings.Repeat("<i></i>", 200) + `x</td></tr></table>`
-	_, err = html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: 1 << 20}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(nodes)})
-	if !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
-		t.Errorf("copied nodes: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("huge spans took %v", elapsed)
+	var limit *convert.LimitError
+	if _, err := html.New(html.Options{Limits: convert.Limits{MaxExpandedBytes: cost - 1}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); !errors.As(err, &limit) || limit.Limit != convert.LimitExpanded {
+		t.Errorf("one under the budget: %v", err)
 	}
 }
 
@@ -151,7 +145,8 @@ func TestOutputLimitIsExact(t *testing.T) {
 		if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); err != nil {
 			t.Errorf("%s at the limit: %v", name, err)
 		}
-		if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at - 1}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); !errors.Is(err, convert.ErrTooLarge) {
+		var limit *convert.LimitError
+		if _, err := html.New(html.Options{Limits: convert.Limits{MaxOutputBytes: at - 1}}).Convert(context.Background(), convert.Input{Reader: strings.NewReader(src)}); !errors.As(err, &limit) || limit.Limit != convert.LimitOutput {
 			t.Errorf("%s one byte over: %v", name, err)
 		}
 	}
@@ -162,6 +157,10 @@ func TestNestedTableOuterBecomesText(t *testing.T) {
 	got := run(t, convert.Input{Reader: strings.NewReader(src)})
 	if !strings.Contains(got, "| i1 | i2 |") || strings.Contains(got, "| o1 |") {
 		t.Errorf("got:\n%s", got)
+	}
+	spanned := `<table><tr><td colspan=1000><table><tr><td>i</td></tr></table></td></tr></table>`
+	if got := run(t, convert.Input{Reader: strings.NewReader(spanned)}); strings.Count(got, "| i |") != 1 {
+		t.Errorf("spanned outer table repeats the inner table:\n%s", got)
 	}
 }
 

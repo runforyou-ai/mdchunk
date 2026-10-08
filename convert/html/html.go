@@ -5,7 +5,9 @@
 // UTF-8 or Options.Fallback. Tables, innermost first, are expanded to
 // rectangular grids before conversion: spans (clamped to the HTML standard's
 // limits and kept within their row group) repeat their cell, short rows are
-// padded, and the copies must fit Limits.MaxExpandedBytes. A
+// padded, and a heuristic score of the copies must fit
+// Limits.MaxExpandedBytes; a table containing another table is left to the
+// converter, which renders it as text around the inner table. A
 // table without header cells promotes its first row, and relative links
 // resolve against Input.BaseURL.
 package html

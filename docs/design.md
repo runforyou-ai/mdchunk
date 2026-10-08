@@ -299,7 +299,7 @@ func (r *Registry) Convert(ctx context.Context, f Format, in Input) (Document, e
 // Zero fields take the defaults; negative fields disable the limit.
 type Limits struct {
 	MaxBytes         int64 // source bytes read; default 32 MiB
-	MaxExpandedBytes int64 // decompressed archive bytes; default 128 MiB
+	MaxExpandedBytes int64 // decompressed archive bytes and HTML table copies; default 128 MiB
 	MaxOutputBytes   int64 // Markdown bytes produced; default 64 MiB
 }
 
@@ -378,14 +378,16 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   `+` and overlong numbers parse as browsers do) and kept within their row
   group, repeat their cell; short rows are padded; pipes in inline code
   (`code`, `var`, `samp`, `kbd`, `tt`) inside cells are escaped. Before a table
-  is expanded, its copies are charged against what is left of
-  `MaxExpandedBytes` in memory terms (64 bytes per copied node and 16 per byte
-  of copied text or attribute, link and image addresses including
-  `Input.BaseURL`), or the conversion fails with an expanded `LimitError`; the
-  output limit applies to the final Markdown. A table without header cells promotes its first
+  is expanded, a heuristic score of its copies (64 per copied node, 16 per byte
+  of copied text or attribute whether rendered or not, links and images also
+  charged `Input.BaseURL`) is charged against what is left of
+  `MaxExpandedBytes`, or the conversion fails with an expanded `LimitError`.
+  The score approximates conversion work and is not a hard memory bound. The
+  output limit applies to the final Markdown.
+  A table without header cells promotes its first
   row; relative links resolve against `Input.BaseURL`. A table whose cells
-  contain another table is rendered as text around the inner table, as the
-  underlying library does. That library builds the whole output and ignores
+  contain another table is not expanded; the underlying library renders it as
+  text around the inner table. That library builds the whole output and ignores
   the context, so the output limit and cancellation are checked again once it
   returns.
 - `convert/csv`: `csv.New(opts)` with `Comma`, `NoHeader` and `LazyQuotes`.

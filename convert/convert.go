@@ -201,7 +201,7 @@ type Limits struct {
 	// MaxBytes bounds the source bytes read.
 	MaxBytes int64
 	// MaxExpandedBytes bounds the decompressed bytes read from archive formats
-	// and the copies HTML table expansion makes.
+	// and the heuristic score of the copies HTML table expansion makes.
 	MaxExpandedBytes int64
 	// MaxOutputBytes bounds the Markdown produced.
 	MaxOutputBytes int64

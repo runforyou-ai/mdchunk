@@ -1,6 +1,7 @@
 package html
 
 import (
+	"math"
 	"strings"
 
 	xhtml "golang.org/x/net/html"
@@ -15,9 +16,10 @@ const (
 	maxRowspan = 65534
 )
 
-// Copies made by table expansion are charged in memory terms: nodeBytes per
-// copied node and textWeight per byte of copied text or attribute, roughly
-// what converting the copy costs.
+// Copies made by table expansion are charged a heuristic work score:
+// nodeBytes per copied node and textWeight per byte of copied text or
+// attribute, whether or not it is rendered. It approximates what converting
+// the copies costs; it is not a hard memory bound.
 const (
 	nodeBytes  = 64
 	textWeight = 16
@@ -46,6 +48,12 @@ func prepareTables(doc *xhtml.Node, maxExpanded int64, baseURL string) error {
 	}
 	walk(doc)
 	for _, table := range tables {
+		// The converter renders a table containing a table as text around the
+		// inner one, so such a table is left as it is; copying its cells would
+		// repeat the inner table.
+		if containsTable(table) {
+			continue
+		}
 		cost, ok := expandTable(table, budget, int64(len(baseURL)))
 		if !ok {
 			return &convert.LimitError{Limit: convert.LimitExpanded, Max: maxExpanded}
@@ -82,7 +90,7 @@ func expandTable(table *xhtml.Node, budget, baseURL int64) (int64, bool) {
 			widths[i] += int64(colspan)
 			widths[i+rowspan] -= int64(colspan)
 			slots := int64(colspan) * int64(rowspan)
-			cost += copyCost(cell, baseURL) * (slots - 1)
+			cost = addSaturated(cost, mulSaturated(copyCost(cell, baseURL), slots-1))
 			area += slots
 		}
 	}
@@ -91,7 +99,7 @@ func expandTable(table *xhtml.Node, budget, baseURL int64) (int64, bool) {
 		active += widths[i]
 		width = max(width, active)
 	}
-	cost += max(int64(len(rows))*width-area, 0) * nodeBytes
+	cost = addSaturated(cost, mulSaturated(max(int64(len(rows))*width-area, 0), nodeBytes))
 	if budget >= 0 && cost > budget {
 		return 0, false
 	}
@@ -147,17 +155,18 @@ func expandTable(table *xhtml.Node, budget, baseURL int64) (int64, bool) {
 }
 
 // copyCost returns what one copy of cell is charged: its nodes, text and
-// attributes, with link and image addresses charged the base URL too.
+// attributes, with every link and image charged the base URL it resolves
+// against. The result saturates at math.MaxInt64.
 func copyCost(cell *xhtml.Node, baseURL int64) int64 {
 	var cost int64
 	var walk func(*xhtml.Node)
 	walk = func(n *xhtml.Node) {
-		cost += nodeBytes + int64(len(n.Data))*textWeight
+		cost = addSaturated(cost, addSaturated(nodeBytes, mulSaturated(int64(len(n.Data)), textWeight)))
 		for _, attr := range n.Attr {
-			cost += int64(len(attr.Key)+len(attr.Val)) * textWeight
-			if attr.Key == "href" || attr.Key == "src" {
-				cost += baseURL * textWeight
-			}
+			cost = addSaturated(cost, mulSaturated(int64(len(attr.Key)+len(attr.Val)), textWeight))
+		}
+		if n.Type == xhtml.ElementNode && (n.DataAtom == atom.A || n.DataAtom == atom.Img) {
+			cost = addSaturated(cost, mulSaturated(baseURL, textWeight))
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			walk(child)
@@ -165,6 +174,39 @@ func copyCost(cell *xhtml.Node, baseURL int64) int64 {
 	}
 	walk(cell)
 	return cost
+}
+
+// addSaturated adds non-negative a and b, saturating at math.MaxInt64.
+func addSaturated(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+// mulSaturated multiplies non-negative a and b, saturating at math.MaxInt64.
+func mulSaturated(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+
+// containsTable reports whether a table holds another table in its cells.
+func containsTable(table *xhtml.Node) bool {
+	var found bool
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		for child := n.FirstChild; child != nil && !found; child = child.NextSibling {
+			if child.DataAtom == atom.Table {
+				found = true
+				return
+			}
+			walk(child)
+		}
+	}
+	walk(table)
+	return found
 }
 
 // tableRows returns the rows of table with their row group ends, including
