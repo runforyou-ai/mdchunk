@@ -298,14 +298,15 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 	targets := map[string]bool{} // target -> always checked
 	var required [][2]string     // both resolutions of each core relationship target
 	for _, entry := range p.archive.File {
-		if !strings.HasSuffix(entry.Name, ".rels") {
+		name := strings.ReplaceAll(entry.Name, `\`, "/")
+		if !strings.HasSuffix(name, ".rels") {
 			continue
 		}
-		root, err := p.readPart(entry.Name, false)
+		root, err := p.readPart(name, false)
 		if err != nil {
 			return nil, err
 		}
-		base := path.Dir(path.Dir(strings.ReplaceAll(entry.Name, `\`, "/")))
+		base := path.Dir(path.Dir(name))
 		for _, item := range root.Child("Relationships").Elements() {
 			if item.Attr("TargetMode") == "External" {
 				continue
