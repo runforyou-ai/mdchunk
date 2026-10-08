@@ -299,7 +299,7 @@ func (r *Registry) Convert(ctx context.Context, f Format, in Input) (Document, e
 // Zero fields take the defaults; negative fields disable the limit.
 type Limits struct {
 	MaxBytes         int64 // source bytes read; default 32 MiB
-	MaxExpandedBytes int64 // decompressed archive bytes; default 128 MiB
+	MaxExpandedBytes int64 // decompressed archive bytes and HTML table copies; default 128 MiB
 	MaxOutputBytes   int64 // Markdown bytes produced; default 64 MiB
 }
 
@@ -341,7 +341,8 @@ type LimitError struct {
   XLSX, PDF) is `ErrCorrupt`. A valid PDF without a text layer yields empty
   Markdown and one empty page section per page.
 - Sources are read up to `MaxBytes+1` to detect `MaxBytes` overflow. Output is
-  limited while it is built, not after.
+  limited while it is built, not after; where a third-party library builds the
+  output, the input to it is bounded first (see `convert/html`).
 - Cancellation is checked between reads, while waiting for a worker, and per
   page, slide, sheet, row or block. A blocked `Read` or a single third-party
   call is not interrupted.
@@ -371,9 +372,24 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   decoded text; plain text is read as Markdown by the splitter, as most plain
   text is. `text.JSON(opts)` wraps the decoded text in a `json` fence longer
   than any backtick run it contains.
-- `convert/html`: `html.New(opts)`. CommonMark with GFM tables; spanned cells
-  repeated; a table without header cells promotes its first row; relative links
-  resolved against `Input.BaseURL`.
+- `convert/html`: `html.New(opts)`. CommonMark with GFM tables. Before
+  conversion every table, innermost first, is expanded to a rectangular grid:
+  spans, clamped to the HTML standard's 1000 columns and 65534 rows (a leading
+  `+` and overlong numbers parse as browsers do) and kept within their row
+  group, repeat their cell; short rows are padded; pipes in inline code
+  (`code`, `var`, `samp`, `kbd`, `tt`) inside cells are escaped. Before a table
+  is expanded, a heuristic score of its copies (64 per copied node, 16 per byte
+  of copied text or attribute whether rendered or not, links and images also
+  charged `Input.BaseURL`) is charged against what is left of
+  `MaxExpandedBytes`, or the conversion fails with an expanded `LimitError`.
+  The score approximates conversion work and is not a hard memory bound. The
+  output limit applies to the final Markdown.
+  A table without header cells promotes its first
+  row; relative links resolve against `Input.BaseURL`. A table whose cells
+  contain another table is not expanded; the underlying library renders it as
+  text around the inner table. That library builds the whole output and ignores
+  the context, so the output limit and cancellation are checked again once it
+  returns.
 - `convert/csv`: `csv.New(opts)` with `Comma`, `NoHeader` and `LazyQuotes`.
   One table; the first row is the header. With `NoHeader` every row is a body
   row under an empty header row of the same width, so the output stays a GFM

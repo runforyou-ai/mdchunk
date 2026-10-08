@@ -291,6 +291,7 @@ func TestTableVariants(t *testing.T) {
 		"cell count":        {"x | y | z\n--|--\n" + rows, false},
 		"escaped pipe row":  {"x \\| y\n--|--\n" + rows, false},
 		"escaped backslash": {"x | y\\\\|\n--|--\n" + rows, true},
+		"backslash pipe":    {"`\\\\|` | z\n--|--\n" + rows, true},
 		"after empty item":  {"Intro\n*\nx | y\n--|--\n" + rows, true},
 	} {
 		chunks := s.Split(tc.text)

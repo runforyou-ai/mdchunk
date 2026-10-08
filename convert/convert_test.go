@@ -142,7 +142,7 @@ func TestLimits(t *testing.T) {
 	if errors.Is(err, convert.ErrCorrupt) {
 		t.Error("LimitError matches ErrCorrupt")
 	}
-	if !strings.Contains(err.Error(), "expanded exceeds 7 bytes") {
+	if !strings.Contains(err.Error(), "expanded limit of 7 exceeded") {
 		t.Errorf("message = %q", err)
 	}
 }

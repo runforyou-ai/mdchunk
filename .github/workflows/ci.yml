@@ -24,7 +24,7 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
       - name: Fuzz
-        run: go test ./split -run '^$' -fuzz FuzzSplit -fuzztime 30s
+        run: ./scripts/fuzz.sh 15s
 
   lint:
     name: Lint

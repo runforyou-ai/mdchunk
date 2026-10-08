@@ -704,37 +704,29 @@ func htmlEnds(end htmlEnd, content string) bool {
 	return false
 }
 
-// hasUnescapedPipe reports whether s contains a '|' not preceded by a backslash.
+// hasUnescapedPipe reports whether s contains a '|' not directly preceded by a
+// backslash; as in GFM, the backslash escapes the pipe whatever precedes it.
 func hasUnescapedPipe(s string) bool {
 	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '\\':
-			i++
-		case '|':
+		if s[i] == '|' && (i == 0 || s[i-1] != '\\') {
 			return true
 		}
 	}
 	return false
 }
 
-// tableCells splits a table row into trimmed cells, ignoring optional edge pipes.
+// tableCells splits a table row into trimmed cells at pipes not directly
+// preceded by a backslash, ignoring optional edge pipes.
 func tableCells(row string) []string {
 	row = strings.TrimSpace(row)
 	row = strings.TrimPrefix(row, "|")
-	if strings.HasSuffix(row, "|") {
-		// The trailing pipe is escaped when an odd number of backslashes precede it.
-		backslashes := len(row) - 1 - len(strings.TrimRight(row[:len(row)-1], "\\"))
-		if backslashes%2 == 0 {
-			row = row[:len(row)-1]
-		}
+	if strings.HasSuffix(row, "|") && !strings.HasSuffix(row, "\\|") {
+		row = row[:len(row)-1]
 	}
 	var cells []string
 	start := 0
 	for i := 0; i < len(row); i++ {
-		switch row[i] {
-		case '\\':
-			i++
-		case '|':
+		if row[i] == '|' && (i == 0 || row[i-1] != '\\') {
 			cells = append(cells, strings.TrimSpace(row[start:i]))
 			start = i + 1
 		}

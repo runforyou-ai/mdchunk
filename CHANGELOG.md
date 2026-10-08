@@ -9,3 +9,5 @@
   `Format` with aliases, `Limits` and the error values converters report.
 - Package `convert/text`: plain text, Markdown and JSON with BOM, declared
   charset and fallback decoding.
+- Package `convert/html`: HTML to CommonMark with GFM tables, `<meta>` charset
+  detection, header promotion and relative link resolution.

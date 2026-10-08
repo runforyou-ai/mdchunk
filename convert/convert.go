@@ -200,7 +200,8 @@ const (
 type Limits struct {
 	// MaxBytes bounds the source bytes read.
 	MaxBytes int64
-	// MaxExpandedBytes bounds the decompressed bytes read from archive formats.
+	// MaxExpandedBytes bounds the decompressed bytes read from archive formats
+	// and the heuristic score of the copies HTML table expansion makes.
 	MaxExpandedBytes int64
 	// MaxOutputBytes bounds the Markdown produced.
 	MaxOutputBytes int64
@@ -246,13 +247,14 @@ const (
 type LimitError struct {
 	// Limit is LimitSource, LimitExpanded or LimitOutput.
 	Limit string
-	// Max is the limit in bytes.
+	// Max is the limit: bytes for the source and output limits, bytes or the
+	// HTML copy score for the expanded limit.
 	Max int64
 }
 
 // Error describes the exceeded limit.
 func (e *LimitError) Error() string {
-	return fmt.Sprintf("mdchunk/convert: %s exceeds %d bytes", e.Limit, e.Max)
+	return fmt.Sprintf("mdchunk/convert: %s limit of %d exceeded", e.Limit, e.Max)
 }
 
 // Is reports whether target is ErrTooLarge.
