@@ -160,6 +160,53 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(undeclared)}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("undeclared corrupt sheet: %v", err)
 	}
+	padded := rezipAll(t, data, func(name, content string) (string, string) {
+		switch name {
+		case "xl/worksheets/sheet1.xml":
+			return "xl/worksheets/data.bin", strings.Repeat(" ", 4096) + strings.Replace(content, "</row>", "</broken>", 1)
+		case "xl/_rels/workbook.xml.rels":
+			return name, strings.ReplaceAll(content, "worksheets/sheet1.xml", "worksheets/data.bin")
+		}
+		return name, content
+	})
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(padded)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("padded undeclared corrupt sheet: %v", err)
+	}
+	for name, edit := range map[string]func(string) string{
+		"extra root": func(s string) string { return s + "<extra/>" },
+		"text":       func(s string) string { return s + "garbage" },
+	} {
+		corrupt := rezip(t, data, "[Content_Types].xml", edit)
+		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(corrupt)}); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("content types with %s: %v", name, err)
+		}
+	}
+}
+
+func TestBOMAndUnreferencedParts(t *testing.T) {
+	data := workbook(t)
+	bom := rezipAll(t, data, func(name, content string) (string, string) {
+		if name == "xl/worksheets/sheet1.xml" || name == "xl/workbook.xml" {
+			return name, "\xEF\xBB\xBF" + content
+		}
+		return name, content
+	})
+	if doc := run(t, xlsx.Options{}, bom); !strings.Contains(doc.Markdown, "华东") {
+		t.Errorf("BOM workbook: %q", doc.Markdown)
+	}
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{"custom/notes.txt": "<3 not markup"}
+	for _, entry := range archive.File {
+		r, _ := entry.Open()
+		content, _ := io.ReadAll(r)
+		files[entry.Name] = string(content)
+	}
+	if doc := run(t, xlsx.Options{}, ooxmltest.Build(t, files)); !strings.Contains(doc.Markdown, "华东") {
+		t.Errorf("unreferenced text part: %q", doc.Markdown)
+	}
 	f := excelize.NewFile()
 	defer func() { _ = f.Close() }()
 	if err := f.SetCellValue("Sheet1", "A1", "a_x0000_b"); err != nil {
@@ -249,6 +296,11 @@ func TestNoTemporaryFilesLeft(t *testing.T) {
 	_, _ = raw.Write([]byte("data"))
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
+	}
+	for _, entry := range archive.File {
+		if entry.Name == "xl/worksheets/sheet1.xml" && entry.UncompressedSize64 <= excelize.StreamChunkSize {
+			t.Fatalf("worksheet of %d bytes stays in memory", entry.UncompressedSize64)
+		}
 	}
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(out.Bytes())}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("unsupported entry: %v", err)

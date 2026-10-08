@@ -3,6 +3,7 @@ package ooxml
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/xml"
@@ -23,6 +24,9 @@ var relationshipNamespaces = map[string]bool{
 	"http://schemas.openxmlformats.org/officeDocument/2006/relationships": true,
 	"http://purl.oclc.org/ooxml/officeDocument/relationships":             true,
 }
+
+// utf8BOM may start an XML part.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // oleMagic starts a Compound File Binary, used by encrypted OOXML and legacy Office formats.
 var oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
@@ -107,6 +111,11 @@ func (p *Package) Files() []*zip.File {
 // ReadPart parses the XML part at name, or returns nil when it is missing.
 // Reads count against the expansion limit.
 func (p *Package) ReadPart(name string) (*Node, error) {
+	return p.readPart(name, true)
+}
+
+// readPart parses the XML part at name; counted reads count against the expansion limit.
+func (p *Package) readPart(name string, counted bool) (*Node, error) {
 	file, err := p.archive.Open(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -117,7 +126,7 @@ func (p *Package) ReadPart(name string) (*Node, error) {
 	defer func() { _ = file.Close() }()
 	var reader io.Reader = file
 	var limited *io.LimitedReader
-	if p.max >= 0 && p.remaining < math.MaxInt64 {
+	if counted && p.max >= 0 && p.remaining < math.MaxInt64 {
 		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
 		reader = limited
 		defer func() { p.remaining = max(limited.N-1, 0) }()
@@ -206,6 +215,9 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 		case xml.EndElement:
 			depth--
 		case xml.CharData:
+			if depth == 0 && roots == 0 {
+				token = bytes.TrimPrefix(token, utf8BOM)
+			}
 			if depth == 0 && len(bytes.TrimSpace(token)) > 0 {
 				return fmt.Errorf("%w: %s has text outside its root element", convert.ErrCorrupt, name)
 			}
@@ -214,11 +226,18 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 }
 
 // XMLParts returns the parts to check as XML: those [Content_Types].xml
-// declares as XML, by part name or extension, and those whose content starts
-// like XML. [Content_Types].xml itself, already parsed, is left out; parts
-// that cannot be opened are left to the reader that needs them.
-func (p *Package) XMLParts() ([]string, error) {
-	types, err := p.ReadPart("[Content_Types].xml")
+// declares as XML, by part name or extension, and parts a relationship
+// targets whose content starts like XML. [Content_Types].xml is checked
+// strictly here and counted once; parts that cannot be opened are left to
+// the reader that needs them.
+func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
+	const contentTypes = "[Content_Types].xml"
+	if _, err := p.archive.Open(contentTypes); err == nil {
+		if err := p.CheckXML(ctx, contentTypes); err != nil {
+			return nil, err
+		}
+	}
+	types, err := p.readPart(contentTypes, false)
 	if err != nil {
 		return nil, err
 	}
@@ -235,17 +254,44 @@ func (p *Package) XMLParts() ([]string, error) {
 			overrides[strings.ToLower(strings.TrimPrefix(item.Attr("PartName"), "/"))] = isXML(item.Attr("ContentType"))
 		}
 	}
-	var names []string
+	declared := func(name string) bool {
+		lower := strings.ToLower(name)
+		if xmlPart, ok := overrides[lower]; ok {
+			return xmlPart
+		}
+		return defaults[strings.TrimPrefix(path.Ext(lower), ".")]
+	}
+	// Relationship targets are found from relationship parts read without counting;
+	// those parts are XML and are checked, and counted, like any other.
+	targets := map[string]bool{}
 	for _, entry := range p.archive.File {
-		if entry.Name == "[Content_Types].xml" || strings.HasSuffix(entry.Name, "/") {
+		if !strings.HasSuffix(entry.Name, ".rels") {
 			continue
 		}
-		name := strings.ToLower(entry.Name)
-		declared, overridden := overrides[name]
-		if !overridden {
-			declared = defaults[strings.TrimPrefix(path.Ext(name), ".")]
+		root, err := p.readPart(entry.Name, false)
+		if err != nil {
+			return nil, err
 		}
-		if declared || looksLikeXML(entry) {
+		base := path.Dir(path.Dir(entry.Name))
+		for _, item := range root.Child("Relationships").Elements() {
+			if item.Attr("TargetMode") == "External" {
+				continue
+			}
+			target := item.Attr("Target")
+			if strings.HasPrefix(target, "/") {
+				target = strings.TrimPrefix(target, "/")
+			} else {
+				target = path.Join(base, target)
+			}
+			targets[target] = true
+		}
+	}
+	var names []string
+	for _, entry := range p.archive.File {
+		if entry.Name == contentTypes || strings.HasSuffix(entry.Name, "/") {
+			continue
+		}
+		if declared(entry.Name) || strings.HasSuffix(entry.Name, ".rels") || targets[entry.Name] && looksLikeXML(entry) {
 			names = append(names, entry.Name)
 		}
 	}
@@ -253,17 +299,28 @@ func (p *Package) XMLParts() ([]string, error) {
 }
 
 // looksLikeXML reports whether an entry's content starts with "<" after an
-// optional BOM and whitespace.
+// optional BOM and any amount of whitespace.
 func looksLikeXML(entry *zip.File) bool {
 	file, err := entry.Open()
 	if err != nil {
 		return false
 	}
 	defer func() { _ = file.Close() }()
-	head := make([]byte, 64)
-	n, _ := io.ReadFull(file, head)
-	head = bytes.TrimLeft(bytes.TrimPrefix(head[:n], []byte{0xEF, 0xBB, 0xBF}), " \t\r\n")
-	return len(head) > 0 && head[0] == '<'
+	reader := bufio.NewReader(file)
+	if head, err := reader.Peek(len(utf8BOM)); err == nil && bytes.Equal(head, utf8BOM) {
+		_, _ = reader.Discard(len(utf8BOM))
+	}
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return false
+		}
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		return b == '<'
+	}
 }
 
 // RequirePart is ReadPart for a part the document cannot do without; a missing

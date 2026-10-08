@@ -61,7 +61,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		return convert.Document{}, err
 	}
 	// The row iterator skips some malformed XML, so every XML part is checked first.
-	parts, err := pkg.XMLParts()
+	parts, err := pkg.XMLParts(ctx)
 	if err != nil {
 		return convert.Document{}, err
 	}
