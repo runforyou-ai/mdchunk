@@ -408,9 +408,11 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   every XML part it may read is checked: parts declared as XML, parts it loads
   from fixed paths, targets of core relationships (resolved both ways the
   library may resolve them) and other targets that start like XML. The check
-  guards against damaged files; a package crafted so that the library resolves
-  a part differently can still convert to less text, as a file holding less
-  text would.
+  guards against damaged files: core parts a relationship names must exist,
+  and two entries whose names differ only in case or separators are rejected.
+  A package crafted so that the library resolves a part differently, or that
+  drops a part together with its relationship, can still convert to less
+  text, as a file holding less text would.
 - `convert/pdf`: `pdf.New(opts)` returns `*pdf.Converter` with `Close() error`.
   One `KindPage` section per page. Text lines are grouped by font size: the
   dominant size is body text, larger short lines become headings

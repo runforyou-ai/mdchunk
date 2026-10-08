@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -230,6 +231,77 @@ func TestCorruptSheetAndNUL(t *testing.T) {
 	}
 	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(twice.Bytes())}); !errors.Is(err, convert.ErrCorrupt) {
 		t.Errorf("duplicate sheet: %v", err)
+	}
+	for name, rename := range map[string]func(string) string{
+		"directory entry": func(n string) string { return n + "/" },
+		"moved elsewhere": func(n string) string { return "unused/" + n },
+	} {
+		for _, part := range []string{"xl/sharedStrings.xml", "xl/styles.xml", "xl/theme/theme1.xml"} {
+			missing := rezipAll(t, data, func(entry, content string) (string, string) {
+				if entry == part {
+					if renamed := rename(entry); strings.HasSuffix(renamed, "/") {
+						return renamed, ""
+					}
+					return rename(entry), content
+				}
+				return entry, content
+			})
+			if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(missing)}); !errors.Is(err, convert.ErrCorrupt) {
+				t.Errorf("%s %s: %v", name, part, err)
+			}
+		}
+	}
+	for name, rename := range map[string]func(string) string{
+		"upper-case shared strings": func(n string) string {
+			if n == "xl/sharedStrings.xml" {
+				return "xl/SHAREDSTRINGS.XML"
+			}
+			return n
+		},
+		"backslash styles": func(n string) string {
+			if n == "xl/styles.xml" {
+				return `xl\styles.xml`
+			}
+			return n
+		},
+	} {
+		variant := rezipAll(t, data, func(entry, content string) (string, string) { return rename(entry), content })
+		if doc := run(t, xlsx.Options{}, variant); !strings.Contains(doc.Markdown, "华东") || !strings.Contains(doc.Markdown, "25%") {
+			t.Errorf("%s: %q", name, doc.Markdown)
+		}
+	}
+	for name, second := range map[string]string{"same name": "xl/worksheets/sheet1.xml", "other case": "XL/worksheets/sheet1.xml", "backslash": `xl\worksheets\sheet1.xml`} {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for _, entry := range archive.File {
+			if err := zw.Copy(entry); err != nil {
+				t.Fatal(err)
+			}
+		}
+		w, err := zw.Create(second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`))
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(buf.Bytes())}); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("duplicate %s: %v", name, err)
+		}
+	}
+	// A fixed part neither present nor referenced is optional.
+	optional := rezipAll(t, data, func(entry, content string) (string, string) {
+		switch entry {
+		case "xl/theme/theme1.xml":
+			return "unused/theme.xml", content
+		case "xl/_rels/workbook.xml.rels":
+			return entry, regexp.MustCompile(`<Relationship [^>]*theme[^>]*?(/>|></Relationship>)`).ReplaceAllString(content, "")
+		}
+		return entry, content
+	})
+	if doc := run(t, xlsx.Options{}, optional); !strings.Contains(doc.Markdown, "华东") {
+		t.Errorf("without theme: %q", doc.Markdown)
 	}
 	for _, part := range []string{"xl/sharedStrings.xml", "xl/styles.xml"} {
 		missing := rezipAll(t, data, func(name, content string) (string, string) {

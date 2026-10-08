@@ -241,6 +241,9 @@ var xmlRelationships = map[string]bool{
 	"officeDocument": true, "worksheet": true, "sharedStrings": true, "styles": true, "theme": true,
 }
 
+// caseInsensitiveParts are parts readers find whatever the case of their name.
+var caseInsensitiveParts = map[string]bool{"xl/sharedstrings.xml": true}
+
 // fixedXMLParts are parts readers load from fixed paths, compared case-insensitively;
 // they are always checked when present.
 var fixedXMLParts = map[string]bool{
@@ -331,30 +334,38 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
-	// A core part a relationship names must exist under one of its resolutions.
-	present := map[string]bool{}
+	// A core part a relationship names must exist as a file under one of its
+	// resolutions; shared strings are matched without regard to case, as
+	// readers match them.
+	present, folded := map[string]bool{}, map[string]bool{}
 	for _, entry := range p.archive.File {
 		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
-		present[normalized], present[path.Clean(normalized)] = true, true
+		if strings.HasSuffix(normalized, "/") {
+			continue
+		}
+		present[normalized], folded[strings.ToLower(normalized)] = true, true
+	}
+	exists := func(name string) bool {
+		return present[name] || caseInsensitiveParts[strings.ToLower(name)] && folded[strings.ToLower(name)]
 	}
 	for _, target := range required {
-		if !present[target[0]] && !present[target[1]] {
+		if !exists(target[0]) && !exists(target[1]) {
 			return nil, fmt.Errorf("%w: missing part %s", convert.ErrCorrupt, target[0])
 		}
 	}
 	var names []string
 	for _, entry := range p.archive.File {
-		if entry.Name == contentTypes || strings.HasSuffix(entry.Name, "/") {
+		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
+		if normalized == contentTypes || strings.HasSuffix(normalized, "/") {
 			continue
 		}
-		normalized := strings.ReplaceAll(entry.Name, `\`, "/")
 		always, targeted := targets[normalized]
 		if !targeted {
 			always, targeted = targets[path.Clean(normalized)]
 		}
 		always = always || fixedXMLParts[strings.ToLower(normalized)]
 		if declared(entry.Name) || strings.HasSuffix(entry.Name, ".rels") || always || targeted && looksLikeXML(entry) {
-			names = append(names, entry.Name)
+			names = append(names, normalized)
 		}
 	}
 	return names, nil
