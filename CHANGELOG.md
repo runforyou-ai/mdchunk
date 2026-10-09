@@ -19,6 +19,13 @@
   charged against `MaxOutputBytes` as it is read.
 - HTML: block quotes and lists nested deeper than 8 levels render at the
   eighth level.
+- HTML: a `<meta>` declaring UTF-16 is ignored, as browsers ignore it.
+- Package `split`: a leading `---` block is front matter only when every
+  line up to the closing delimiter reads as YAML and one is a key; otherwise
+  it is a thematic break and the headings below keep their paths.
+- Package `split`: last-resort cuts keep grapheme clusters (emoji sequences,
+  flags, combining marks) whole when a cluster boundary is within reach.
+- `Chunk.Context` is documented as unbounded by `Size` and `MaxSize`.
 
 ## v0.1.0
 
