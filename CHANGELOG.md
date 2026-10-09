@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
 - Word, PowerPoint and Excel parts nesting elements deeper than 256 levels
   are `ErrCorrupt` instead of overflowing the stack; character data is collected
