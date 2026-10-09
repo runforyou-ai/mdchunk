@@ -1,8 +1,8 @@
 // Package html converts HTML to CommonMark with GFM tables.
 //
 // The encoding comes from a BOM, then Input.Charset when it names a known
-// encoding, then the first <meta> charset declaration before <body>, then
-// UTF-8 or Options.Fallback. Tables, innermost first, are expanded to
+// encoding, then the first <meta> charset declaration before <body> other
+// than UTF-16, which browsers ignore, then UTF-8 or Options.Fallback. Tables, innermost first, are expanded to
 // rectangular grids before conversion: spans (clamped to the HTML standard's
 // limits and kept within their row group) repeat their cell, short rows are
 // padded, and a heuristic score of the copies must fit
@@ -27,6 +27,7 @@ import (
 	xhtml "golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/htmlindex"
 
 	"github.com/runforyou-ai/mdchunk/convert"
 	"github.com/runforyou-ai/mdchunk/internal/mdwrite"
@@ -72,6 +73,13 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	declared := in.Charset
 	if textdecode.Lookup(declared) == nil {
 		declared = metaCharset(data)
+		// A <meta> that could be read as ASCII cannot be UTF-16; as browsers
+		// ignore such a declaration, the input is treated as undeclared.
+		if e := textdecode.Lookup(declared); e != nil {
+			if name, _ := htmlindex.Name(e); name == "utf-16le" || name == "utf-16be" {
+				declared = ""
+			}
+		}
 	}
 	text := textdecode.Decode(data, declared, c.opts.Fallback)
 	if strings.TrimSpace(text) == "" {

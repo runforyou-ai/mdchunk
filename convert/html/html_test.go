@@ -204,15 +204,19 @@ func TestCharset(t *testing.T) {
 		"utf-8 with bom": {Reader: strings.NewReader("\xEF\xBB\xBF" + body)},
 		"utf-16 bom":     {Reader: strings.NewReader(utf16(t, body))},
 		"unknown input":  {Reader: strings.NewReader(`<meta charset="gbk">` + gbk(t)), Charset: "bogus"},
+		"meta utf-16":    {Reader: strings.NewReader(`<meta charset="utf-16">` + body)},
+		"meta utf-16be":  {Reader: strings.NewReader(`<meta http-equiv="Content-Type" content="text/html; charset=UTF-16BE">` + body)},
 	} {
 		if got := run(t, in); got != "中文" {
 			t.Errorf("%s: got %q", name, got)
 		}
 	}
-	doc, err := html.New(html.Options{Fallback: simplifiedchinese.GB18030}).Convert(context.Background(),
-		convert.Input{Reader: strings.NewReader(gbk(t))})
-	if err != nil || doc.Markdown != "中文" {
-		t.Errorf("fallback: %q, %v", doc.Markdown, err)
+	for _, source := range []string{gbk(t), `<meta charset="utf-16">` + gbk(t)} {
+		doc, err := html.New(html.Options{Fallback: simplifiedchinese.GB18030}).Convert(context.Background(),
+			convert.Input{Reader: strings.NewReader(source)})
+		if err != nil || doc.Markdown != "中文" {
+			t.Errorf("fallback: %q, %v", doc.Markdown, err)
+		}
 	}
 }
 

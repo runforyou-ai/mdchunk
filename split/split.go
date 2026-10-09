@@ -82,6 +82,8 @@ type TableHeader struct {
 
 // Context renders the heading texts joined by " > " and the table header,
 // separated by a newline. An empty part adds no separator.
+// Its length is not bounded by Options: a long heading or a wide table header
+// appears in full in every chunk under it.
 func (c Chunk) Context() string {
 	parts := make([]string, 0, 2)
 	if len(c.Headings) > 0 {
@@ -227,6 +229,19 @@ func (s *Splitter) cut(l *layout, start, hard, prevEnd int) int {
 	// Chunks must advance past the previous end.
 	if floor := max(start, prevEnd); position <= floor {
 		position = l.positionAt(int(l.cp[floor]) + 1)
+	}
+	// Keep a grapheme cluster whole when one of its ends lies within reach.
+	if l.ranks[position] == rankJoined {
+		for i := position - 1; i > max(start, prevEnd, contentStart); i-- {
+			if l.ranks[i] >= rankNone {
+				return i
+			}
+		}
+		for i, limit := position+1, l.lastPositionAt(base+s.maxSize); i <= limit && (i < contentEnd || tailAlone); i++ {
+			if l.ranks[i] >= rankNone {
+				return i
+			}
+		}
 	}
 	return position
 }

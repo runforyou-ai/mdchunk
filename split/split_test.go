@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -338,6 +339,65 @@ func TestStructuresAreNotHeadings(t *testing.T) {
 			t.Errorf("%s: found headings %+v", name, scan(text).headings)
 		}
 	}
+}
+
+func TestFrontMatterNeedsYAML(t *testing.T) {
+	for name, tc := range map[string]struct {
+		text        string
+		frontMatter bool
+	}{
+		"keys":              {"---\ntitle: x\ntags:\n  - a\n- b\n# comment\n\nurl: http://e.com\n---\n# H\n", true},
+		"dots":              {"---\ntitle: x\n...\n# H\n", true},
+		"thematic breaks":   {"---\n\n# 第一章\n\n内容一。\n\n---\n\n# 第二章\n", false},
+		"comments only":     {"---\n# H\n---\n", false},
+		"prose with colon":  {"---\nNote: see below.\nMore prose here\n---\n# H\n", false},
+		"colon inside word": {"---\nhttp://e.com\n---\n# H\n", false},
+	} {
+		end := scan(tc.text).frontMatterEnd(splitLines(tc.text))
+		if (end >= 0) != tc.frontMatter {
+			t.Errorf("%s: front matter end %d, want front matter %v", name, end, tc.frontMatter)
+		}
+	}
+	// Chapters between thematic breaks keep their heading paths.
+	s := mustNew(t, Options{Size: 4})
+	text := "---\n\n# 第一章\n\n内容一。\n\n---\n\n# 第二章\n\n内容二。\n"
+	chunks := s.Split(text)
+	checkContract(t, s, text, chunks)
+	var paths []string
+	for _, c := range chunks {
+		if strings.HasPrefix(strings.TrimSpace(c.Text), "内容") {
+			paths = append(paths, strings.Join(headingTexts(c), " > "))
+		}
+	}
+	if want := []string{"第一章", "第二章"}; !slices.Equal(paths, want) {
+		t.Errorf("heading paths = %q, want %q", paths, want)
+	}
+}
+
+func TestGraphemeClustersStayWhole(t *testing.T) {
+	for name, text := range map[string]string{
+		"family emoji": strings.Repeat("👨‍👩‍👧‍👦", 100),
+		"flags":        strings.Repeat("🇨🇳", 300),
+		"skin tones":   strings.Repeat("👍🏽", 300),
+		"combining":    strings.Repeat("e\u0301", 300),
+	} {
+		s := mustNew(t, Options{Size: 101})
+		chunks := s.Split(text)
+		checkContract(t, s, text, chunks)
+		for _, c := range chunks[:len(chunks)-1] {
+			previous, _ := utf8.DecodeLastRuneInString(text[:c.End])
+			next, _ := utf8.DecodeRuneInString(text[c.End:])
+			flags := strings.Count(text[:c.End], "🇨")
+			if previous == '\u200D' || next == '\u200D' || unicode.Is(unicode.Mn, next) || next == 0x1F3FD ||
+				name == "flags" && flags != strings.Count(text[:c.End], "🇳") {
+				t.Errorf("%s: chunk ends inside a cluster at %d", name, c.End)
+			}
+		}
+	}
+	// A cluster longer than MaxSize is still cut within it.
+	s := mustNew(t, Options{Size: 50})
+	text := "a" + strings.Repeat("\u0301", 500)
+	checkContract(t, s, text, s.Split(text))
 }
 
 func TestHeadingsAreRecognised(t *testing.T) {
