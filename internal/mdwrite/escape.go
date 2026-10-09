@@ -57,14 +57,21 @@ type Table struct {
 	rows        [][]string
 	width       int
 	cellBytes   int64
-	max         int64
+	left        int64 // bytes the rendering may take
+	max         int64 // the limit errors report
 }
 
 // NewTable returns a Table whose rendering may not exceed maxBytes; maxBytes < 0
 // means unlimited. With firstRowHeader the first added row is the header;
 // otherwise the table renders under an empty header row unless SetHeader is called.
 func NewTable(maxBytes int64, firstRowHeader bool) *Table {
-	return &Table{max: maxBytes, firstHeader: firstRowHeader}
+	return NewTableWithin(maxBytes, maxBytes, firstRowHeader)
+}
+
+// NewTableWithin is NewTable for a table that may take only left bytes of an
+// output limit of maxBytes, which its errors report; left < 0 means unlimited.
+func NewTableWithin(left, maxBytes int64, firstRowHeader bool) *Table {
+	return &Table{left: left, max: maxBytes, firstHeader: firstRowHeader}
 }
 
 // SetHeader sets the header row, keeping it even when its cells are empty.
@@ -103,10 +110,15 @@ func (t *Table) Add(row []string) error {
 	return t.check()
 }
 
-// escapeCells applies Cell to every cell of row.
+// escapeCells applies Cell to every cell of row. A cell equal to the one
+// before it shares its escaped text, so repeated spanned cells are escaped once.
 func escapeCells(row []string) []string {
 	cells := make([]string, len(row))
 	for i, cell := range row {
+		if i > 0 && cell == row[i-1] {
+			cells[i] = cells[i-1]
+			continue
+		}
 		cells[i] = Cell(cell)
 	}
 	return cells
@@ -134,7 +146,7 @@ func (t *Table) size() int64 {
 
 // check reports whether the table still fits its limit.
 func (t *Table) check() error {
-	if t.max >= 0 && t.size() > t.max {
+	if t.left >= 0 && t.size() > t.left {
 		return &convert.LimitError{Limit: convert.LimitOutput, Max: t.max}
 	}
 	return nil

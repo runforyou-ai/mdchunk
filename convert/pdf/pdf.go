@@ -10,6 +10,11 @@
 // section per page. Documents that need a password to open return
 // convert.ErrEncrypted; documents restricted only by an owner password convert
 // normally, and permission flags are not checked.
+//
+// Options.MaxPages and Options.MaxPageChars bound the pages of a document and
+// the characters of one page, and line text counts against
+// Limits.MaxOutputBytes as it is read. PDFium parses each page in one call
+// that cannot be interrupted, before its characters can be counted.
 package pdf
 
 import (
@@ -26,8 +31,8 @@ import (
 
 	"github.com/klippa-app/go-pdfium"
 	pdfiumerrors "github.com/klippa-app/go-pdfium/errors"
+	"github.com/klippa-app/go-pdfium/references"
 	"github.com/klippa-app/go-pdfium/requests"
-	"github.com/klippa-app/go-pdfium/responses"
 	"github.com/klippa-app/go-pdfium/webassembly"
 
 	"github.com/runforyou-ai/mdchunk/convert"
@@ -44,6 +49,12 @@ const (
 	headingLevels   = 3
 )
 
+// Default page limits.
+const (
+	DefaultMaxPages     = 10000
+	DefaultMaxPageChars = 1 << 20
+)
+
 // Options configures the PDF converter. The zero value is the default.
 type Options struct {
 	convert.Limits
@@ -51,6 +62,13 @@ type Options struct {
 	Workers int
 	// NoHeadings renders every line as body text.
 	NoHeadings bool
+	// MaxPages bounds the pages of a document. Zero means DefaultMaxPages;
+	// negative means unlimited.
+	MaxPages int
+	// MaxPageChars bounds the characters PDFium reports for one page,
+	// including the spaces and line breaks it generates. Zero means
+	// DefaultMaxPageChars; negative means unlimited.
+	MaxPageChars int
 }
 
 // Converter converts PDF documents. It is safe for concurrent use and must be
@@ -148,7 +166,16 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if len(data) == 0 {
 		return convert.Document{}, fmt.Errorf("%w: empty file", convert.ErrCorrupt)
 	}
-	lines, pages, err := extract(ctx, pool, data)
+	maxPages, maxPageChars := c.opts.MaxPages, c.opts.MaxPageChars
+	if maxPages == 0 {
+		maxPages = DefaultMaxPages
+	}
+	if maxPageChars == 0 {
+		maxPageChars = DefaultMaxPageChars
+	}
+	lines, pages, err := extract(ctx, pool, data, extractLimits{
+		pages: maxPages, pageChars: maxPageChars, output: limits.MaxOutputBytes,
+	})
 	if err != nil {
 		return convert.Document{}, err
 	}
@@ -170,8 +197,15 @@ type line struct {
 	top, bottom float64
 }
 
+// extractLimits bound extraction; negative fields are unlimited.
+type extractLimits struct {
+	pages, pageChars int
+	// output bounds the bytes of line text, which the Markdown always exceeds.
+	output int64
+}
+
 // extract reads the text lines of every page and the page count.
-func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, error) {
+func extract(ctx context.Context, pool pdfium.Pool, data []byte, limits extractLimits) ([]line, int, error) {
 	instance, err := pool.GetInstanceWithContext(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -191,82 +225,157 @@ func extract(ctx context.Context, pool pdfium.Pool, data []byte) ([]line, int, e
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
-	var lines []line
+	if limits.pages >= 0 && count.PageCount > limits.pages {
+		return nil, 0, &convert.LimitError{Limit: convert.LimitPages, Max: int64(limits.pages)}
+	}
+	b := &lineBuilder{output: limits.output, max: limits.output}
 	for index := range count.PageCount {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		page, err := instance.GetPageTextStructured(&requests.GetPageTextStructured{
-			Page:                   requests.Page{ByIndex: &requests.PageByIndex{Document: document.Document, Index: index}},
-			Mode:                   requests.GetPageTextStructuredModeChars,
-			CollectFontInformation: true,
-		})
-		if err != nil {
-			return nil, 0, fmt.Errorf("%w: page %d: %w", convert.ErrCorrupt, index+1, err)
+		if err := readPage(ctx, instance, document.Document, index, limits.pageChars, b); err != nil {
+			return nil, 0, err
 		}
-		lines = appendChars(lines, index, page.Chars)
 	}
-	// Extraction does not observe ctx, so cancellation is checked once it is done.
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	return lines, count.PageCount, nil
+	return b.lines, count.PageCount, nil
 }
 
-// appendChars groups a page's characters into lines following PDFium's text
-// order: CRLF pairs in the character stream end lines, the spaces it generates or
-// reads separate words, and other control characters count as spaces. Each
-// character is read once. A line's font size is the size of most of its
-// characters and its box encloses theirs.
-func appendChars(lines []line, page int, chars []*responses.GetPageTextStructuredChar) []line {
-	weights := map[float64]int{}
-	var text []byte
-	open, space := false, false
-	finish := func() {
-		if !open {
-			return
-		}
-		l := &lines[len(lines)-1]
-		l.text = string(text)
-		best := -1
-		for size, count := range weights {
-			if count > best || count == best && size < l.size {
-				l.size, best = size, count
+// readPage adds the lines of the page at index to b, following PDFium's text
+// order: CRLF pairs in the character stream end lines, the spaces it
+// generates or reads separate words, and other control characters count as
+// spaces. Each character is read once. Cancellation is checked between
+// characters in batches.
+func readPage(ctx context.Context, instance pdfium.Pdfium, document references.FPDF_DOCUMENT, index, maxChars int, b *lineBuilder) error {
+	corrupt := func(err error) error {
+		return fmt.Errorf("%w: page %d: %w", convert.ErrCorrupt, index+1, err)
+	}
+	text, err := instance.FPDFText_LoadPage(&requests.FPDFText_LoadPage{
+		Page: requests.Page{ByIndex: &requests.PageByIndex{Document: document, Index: index}},
+	})
+	if err != nil {
+		return corrupt(err)
+	}
+	defer func() { _, _ = instance.FPDFText_ClosePage(&requests.FPDFText_ClosePage{TextPage: text.TextPage}) }()
+	count, err := instance.FPDFText_CountChars(&requests.FPDFText_CountChars{TextPage: text.TextPage})
+	if err != nil {
+		return corrupt(err)
+	}
+	if maxChars >= 0 && count.Count > maxChars {
+		return &convert.LimitError{Limit: convert.LimitPageChars, Max: int64(maxChars)}
+	}
+	b.page, b.open, b.space = index, false, false
+	carriageReturn := false
+	for i := range count.Count {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 		}
-		clear(weights)
-		open = false
-	}
-	for i, char := range chars {
-		if char.Text == "\r" && i+1 < len(chars) && chars[i+1].Text == "\n" {
-			finish()
+		char, err := instance.FPDFText_GetUnicode(&requests.FPDFText_GetUnicode{TextPage: text.TextPage, Index: i})
+		if err != nil {
+			return corrupt(err)
+		}
+		r, s := utf8.RuneError, ""
+		if char.Unicode != 0 {
+			s = string(rune(char.Unicode))
+			r, _ = utf8.DecodeRuneInString(s)
+		}
+		// A CR is a line end when an LF follows it, and a control character otherwise.
+		if carriageReturn {
+			carriageReturn = false
+			if r == '\n' {
+				b.finish()
+				continue
+			}
+			b.space = b.space || b.open
+		}
+		if s == "\r" {
+			carriageReturn = true
 			continue
 		}
-		r, _ := utf8.DecodeRuneInString(char.Text)
-		if char.Text == "" || unicode.IsSpace(r) || unicode.IsControl(r) {
-			space = space || open
+		if s == "" || unicode.IsSpace(r) || unicode.IsControl(r) {
+			b.space = b.space || b.open
 			continue
 		}
-		size := 0.0
-		if char.FontInformation != nil {
-			size = char.FontInformation.RenderedSize
+		size, err := instance.FPDFText_GetFontSize(&requests.FPDFText_GetFontSize{TextPage: text.TextPage, Index: i})
+		if err != nil {
+			return corrupt(err)
 		}
-		position := char.PointPosition
-		if !open {
-			lines = append(lines, line{page: page, top: position.Top, bottom: position.Bottom})
-			text, open, space = text[:0], true, false
+		rendered := size.FontSize
+		if matrix, err := instance.FPDFText_GetMatrix(&requests.FPDFText_GetMatrix{TextPage: text.TextPage, Index: i}); err == nil {
+			rendered *= math.Sqrt(float64(matrix.Matrix.C)*float64(matrix.Matrix.C) + float64(matrix.Matrix.D)*float64(matrix.Matrix.D))
 		}
-		l := &lines[len(lines)-1]
-		if space {
-			text = append(text, ' ')
-			space = false
+		box, err := instance.FPDFText_GetCharBox(&requests.FPDFText_GetCharBox{TextPage: text.TextPage, Index: i})
+		if err != nil {
+			return corrupt(err)
 		}
-		text = append(text, char.Text...)
-		weights[size]++
-		l.top, l.bottom = max(l.top, position.Top), min(l.bottom, position.Bottom)
+		if err := b.add(s, rendered, box.Top, box.Bottom); err != nil {
+			return err
+		}
 	}
-	finish()
-	return lines
+	b.finish()
+	return nil
+}
+
+// lineBuilder groups characters into lines. A line's font size is the size
+// of most of its characters and its box encloses theirs.
+type lineBuilder struct {
+	lines       []line
+	page        int
+	text        []byte
+	weights     map[float64]int
+	open, space bool
+	// output is what is left of the bytes line text may take, negative when
+	// unlimited; max is the limit errors report.
+	output, max int64
+}
+
+// add appends a character of text, font size and vertical extent to the open
+// line, opening one if needed.
+func (b *lineBuilder) add(text string, size, top, bottom float64) error {
+	if !b.open {
+		b.lines = append(b.lines, line{page: b.page, top: top, bottom: bottom})
+		b.text, b.open, b.space = b.text[:0], true, false
+		if b.weights == nil {
+			b.weights = map[float64]int{}
+		}
+	}
+	grow := int64(len(text))
+	if b.space {
+		grow++
+	}
+	if b.output >= 0 {
+		if grow > b.output {
+			return &convert.LimitError{Limit: convert.LimitOutput, Max: b.max}
+		}
+		b.output -= grow
+	}
+	l := &b.lines[len(b.lines)-1]
+	if b.space {
+		b.text = append(b.text, ' ')
+		b.space = false
+	}
+	b.text = append(b.text, text...)
+	b.weights[size]++
+	l.top, l.bottom = max(l.top, top), min(l.bottom, bottom)
+	return nil
+}
+
+// finish closes the open line, if any.
+func (b *lineBuilder) finish() {
+	if !b.open {
+		return
+	}
+	l := &b.lines[len(b.lines)-1]
+	l.text = string(b.text)
+	best := -1
+	for size, count := range b.weights {
+		if count > best || count == best && size < l.size {
+			l.size, best = size, count
+		}
+	}
+	clear(b.weights)
+	b.open = false
 }
 
 // render writes lines as Markdown with one section per page.

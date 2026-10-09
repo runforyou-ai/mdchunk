@@ -200,8 +200,9 @@ const (
 type Limits struct {
 	// MaxBytes bounds the source bytes read.
 	MaxBytes int64
-	// MaxExpandedBytes bounds the decompressed bytes read from archive formats
-	// and the heuristic score of the copies HTML table expansion makes.
+	// MaxExpandedBytes bounds the decompressed bytes read from archive formats,
+	// with each XML element Word and PowerPoint documents parse counting 64
+	// bytes more, and the heuristic score of the copies HTML table expansion makes.
 	MaxExpandedBytes int64
 	// MaxOutputBytes bounds the Markdown produced.
 	MaxOutputBytes int64
@@ -235,20 +236,24 @@ var (
 	ErrClosed      = errors.New("mdchunk/convert: converter closed")
 )
 
-// Limit names used by LimitError.
+// Limit names used by LimitError. LimitPages and LimitPageChars are the PDF
+// converter's page limits.
 const (
-	LimitSource   = "source"
-	LimitExpanded = "expanded"
-	LimitOutput   = "output"
+	LimitSource    = "source"
+	LimitExpanded  = "expanded"
+	LimitOutput    = "output"
+	LimitPages     = "pages"
+	LimitPageChars = "page_chars"
 )
 
 // LimitError reports that a conversion exceeded one of its Limits.
 // errors.Is(err, ErrTooLarge) reports true for it.
 type LimitError struct {
-	// Limit is LimitSource, LimitExpanded or LimitOutput.
+	// Limit is one of the Limit names.
 	Limit string
 	// Max is the limit: bytes for the source and output limits, bytes or the
-	// HTML copy score for the expanded limit.
+	// HTML copy score for the expanded limit, pages for LimitPages and
+	// characters for LimitPageChars.
 	Max int64
 }
 

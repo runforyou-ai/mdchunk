@@ -79,6 +79,17 @@ func TestSheets(t *testing.T) {
 	}
 }
 
+func TestOutputLimitAcrossSheets(t *testing.T) {
+	data := workbook(t)
+	size := int64(len(run(t, xlsx.Options{IncludeHidden: true}, data).Markdown))
+	run(t, xlsx.Options{IncludeHidden: true, Limits: convert.Limits{MaxOutputBytes: size}}, data)
+	_, err := xlsx.New(xlsx.Options{IncludeHidden: true, Limits: convert.Limits{MaxOutputBytes: size - 1}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != size-1 {
+		t.Errorf("one byte over: %v", err)
+	}
+}
+
 func TestOptions(t *testing.T) {
 	doc := run(t, xlsx.Options{RawValues: true, IncludeHidden: true}, workbook(t))
 	want := "## 销售\n\n| 地区 | 占比 | 备注 |\n| --- | --- | --- |\n| 华东 | 0.25 | a\\|b |\n| 华南 | 0.5 |  |\n\n## 隐藏\n\n| secret |\n| --- |"

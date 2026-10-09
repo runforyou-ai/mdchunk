@@ -66,6 +66,10 @@ type document struct {
 	numAbstract map[string]string
 	styleLevels map[string]map[string]string
 	inCell      bool // table cells are not escaped: block markers have no effect there
+	inLink      bool // hyperlinks inside a link label render as their text
+	// output is the output budget left for top-level blocks and their
+	// separators; negative means unlimited.
+	output int64
 }
 
 // Convert converts in to Markdown.
@@ -82,7 +86,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, err
 	}
-	root, err := pkg.RequirePart("word/document.xml")
+	root, err := pkg.RequirePart(ctx, "word/document.xml")
 	if err != nil {
 		return convert.Document{}, err
 	}
@@ -92,8 +96,8 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	}
 	d := &document{ctx: ctx, limits: limits, ordered: map[string]map[string]bool{},
 		links: map[string]string{}, styles: map[string]styleInfo{}, numAbstract: map[string]string{},
-		styleLevels: map[string]map[string]string{}}
-	if err := d.load(pkg); err != nil {
+		styleLevels: map[string]map[string]string{}, output: limits.MaxOutputBytes}
+	if err := d.load(ctx, pkg); err != nil {
 		return convert.Document{}, err
 	}
 	w := mdwrite.New(limits.MaxOutputBytes)
@@ -112,8 +116,8 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 }
 
 // load reads hyperlink targets, heading styles and list formats.
-func (d *document) load(pkg *ooxml.Package) error {
-	relationships, err := pkg.Relationships("word/document.xml")
+func (d *document) load(ctx context.Context, pkg *ooxml.Package) error {
+	relationships, err := pkg.Relationships(ctx, "word/document.xml")
 	if err != nil {
 		return err
 	}
@@ -122,7 +126,7 @@ func (d *document) load(pkg *ooxml.Package) error {
 			d.links[id] = item.Target
 		}
 	}
-	styles, err := pkg.ReadPart("word/styles.xml")
+	styles, err := pkg.ReadPart(ctx, "word/styles.xml")
 	if err != nil {
 		return err
 	}
@@ -149,7 +153,7 @@ func (d *document) load(pkg *ooxml.Package) error {
 		info.numID, info.ilvl = list.Child("numId").Attr("val"), list.Child("ilvl").Attr("val")
 		d.styles[id] = info
 	}
-	numbering, err := pkg.ReadPart("word/numbering.xml")
+	numbering, err := pkg.ReadPart(ctx, "word/numbering.xml")
 	if err != nil {
 		return err
 	}
@@ -251,16 +255,16 @@ func (d *document) blocks(node *ooxml.Node, blocks *[]string) error {
 		}
 		switch child.Name {
 		case "p":
-			if block := d.paragraph(child); block != "" {
-				*blocks = append(*blocks, block)
+			if err := d.add(blocks, d.paragraph(child)); err != nil {
+				return err
 			}
 		case "tbl":
 			block, err := d.table(child)
 			if err != nil {
 				return err
 			}
-			if block != "" {
-				*blocks = append(*blocks, block)
+			if err := d.add(blocks, block); err != nil {
+				return err
 			}
 		case "sectPr":
 		default:
@@ -269,6 +273,26 @@ func (d *document) blocks(node *ooxml.Node, blocks *[]string) error {
 			}
 		}
 	}
+	return nil
+}
+
+// add appends a non-empty block. Outside table cells the block and its
+// separator are charged against the output budget as they are added.
+func (d *document) add(blocks *[]string, block string) error {
+	if block == "" {
+		return nil
+	}
+	if !d.inCell && d.output >= 0 {
+		size := int64(len(block))
+		if len(*blocks) > 0 {
+			size += 2
+		}
+		if size > d.output {
+			return &convert.LimitError{Limit: convert.LimitOutput, Max: d.limits.MaxOutputBytes}
+		}
+		d.output -= size
+	}
+	*blocks = append(*blocks, block)
 	return nil
 }
 
@@ -333,12 +357,14 @@ func (d *document) text(node *ooxml.Node, builder *strings.Builder) {
 			builder.WriteString("\n")
 		case "hyperlink":
 			target := d.links[child.Attr("r:id")]
-			if target == "" {
+			if target == "" || d.inLink {
 				d.text(child, builder)
 				continue
 			}
 			var label strings.Builder
+			d.inLink = true
 			d.text(child, &label)
+			d.inLink = false
 			text := strings.NewReplacer("[", `\[`, "]", `\]`).Replace(strings.Join(strings.Fields(label.String()), " "))
 			builder.WriteString("[" + text + "](<" + linkTarget.Replace(target) + ">)")
 		case "pPr", "rPr", "drawing", "pict", "object", "Fallback":
@@ -350,7 +376,7 @@ func (d *document) text(node *ooxml.Node, builder *strings.Builder) {
 
 // table renders a table; horizontal spans repeat the cell and vertical merges carry the value down.
 func (d *document) table(node *ooxml.Node) (string, error) {
-	table := mdwrite.NewTable(d.limits.MaxOutputBytes, true)
+	table := mdwrite.NewTableWithin(d.output, d.limits.MaxOutputBytes, true)
 	var previous []string
 	for _, row := range node.Children {
 		if row.Name != "tr" {

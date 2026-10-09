@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -169,6 +170,76 @@ func TestCharts(t *testing.T) {
 	want := "趋势\n\n|  | x | y | size |\n| --- | --- | --- | --- |\n| A | 1 | 5 |  |\n| A | 2 | 7 |  |\n| B | 100 | 6 |  |\n| B | 200 | 8 |  |\n|  | 3 | 4 | 9 |"
 	if doc := run(t, pptx.Options{}, deckWithChart(t, chart)); doc.Markdown != want {
 		t.Errorf("got:\n%s\nwant:\n%s", doc.Markdown, want)
+	}
+}
+
+// allocated returns the bytes f allocates.
+func allocated(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestSparseChartPoints(t *testing.T) {
+	// Series holding only their last possible point take memory for that point alone.
+	const series = 1000
+	var chart strings.Builder
+	chart.WriteString(`<c:chartSpace ` + ns + `><c:chart><c:plotArea><c:barChart>`)
+	for range series {
+		chart.WriteString(`<c:ser><c:val><c:numCache><c:pt idx="65535"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>`)
+	}
+	chart.WriteString(`</c:barChart><c:scatterChart><c:ser><c:tx><c:v>S</c:v></c:tx>` +
+		`<c:xVal><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="5"><c:v>2</c:v></c:pt></c:numLit></c:xVal>` +
+		`<c:yVal><c:numLit><c:pt idx="5"><c:v>3</c:v></c:pt></c:numLit></c:yVal></c:ser></c:scatterChart></c:plotArea></c:chart></c:chartSpace>`)
+	data := deckWithChart(t, chart.String())
+	var doc convert.Document
+	if bytes := allocated(func() { doc = run(t, pptx.Options{}, data) }); bytes > 64<<20 {
+		t.Errorf("allocated %d MiB", bytes>>20)
+	}
+	tables := strings.Split(doc.Markdown, "\n\n")
+	if len(tables) != 2 {
+		t.Fatalf("got %d blocks:\n%s", len(tables), doc.Markdown)
+	}
+	if rows := strings.Split(tables[0], "\n"); len(rows) != 3 || strings.Count(rows[2], "| 1 ") != series {
+		t.Errorf("category table has %d rows", len(rows))
+	}
+	// Scatter rows exist for point indices only, not for the gap between them.
+	if want := "|  | x | y |\n| --- | --- | --- |\n| S | 1 |  |\n| S | 2 | 3 |"; tables[1] != want {
+		t.Errorf("point table:\n%s\nwant:\n%s", tables[1], want)
+	}
+}
+
+func TestDeepNesting(t *testing.T) {
+	deep := strings.Repeat("<x>", 1<<20) + strings.Repeat("</x>", 1<<20)
+	for name, data := range map[string][]byte{
+		"slide": deck(t, nil, `<p:sp><p:txBody><a:p>`+deep+`</a:p></p:txBody></p:sp>`),
+		"chart": deckWithChart(t, `<c:chartSpace `+ns+`><c:chart><c:plotArea><c:barChart><c:ser><c:val>`+deep+`</c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>`),
+	} {
+		_, err := pptx.New(pptx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+		if !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("%s: err = %v, want ErrCorrupt", name, err)
+		}
+	}
+}
+
+func TestSlideOutputBudget(t *testing.T) {
+	// Each table fits the output limit alone; the slide stops at the table that does not.
+	cell := strings.Repeat("x", 100<<10)
+	table := `<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>` + cell +
+		`</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>`
+	data := deck(t, nil, strings.Repeat(table, 200))
+	var err error
+	opts := pptx.Options{Limits: convert.Limits{MaxOutputBytes: 1 << 20}}
+	if bytes := allocated(func() {
+		_, err = pptx.New(opts).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+	}); bytes > 48<<20 {
+		t.Errorf("allocated %d MiB", bytes>>20)
+	}
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != 1<<20 {
+		t.Fatalf("err = %v, want the output limit", err)
 	}
 }
 

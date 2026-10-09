@@ -98,7 +98,12 @@ func (c *Converter) render(ctx context.Context, data []byte, limits convert.Limi
 	w := mdwrite.New(limits.MaxOutputBytes)
 	var sections []convert.Section
 	for number, sheet := range file.GetSheetList() {
-		table, err := c.sheet(ctx, file, sheet, limits)
+		// A sheet's table may take what is left of the output limit.
+		left := int64(-1)
+		if limits.MaxOutputBytes >= 0 {
+			left = max(limits.MaxOutputBytes-int64(w.Len()), 0)
+		}
+		table, err := c.sheet(ctx, file, sheet, mdwrite.NewTableWithin(left, limits.MaxOutputBytes, true))
 		if err != nil {
 			return convert.Document{}, err
 		}
@@ -108,6 +113,9 @@ func (c *Converter) render(ctx context.Context, data []byte, limits convert.Limi
 		start := w.Len()
 		if table != "" {
 			w.WriteString("## " + mdwrite.Cell(sheet) + "\n\n" + table)
+		}
+		if err := w.Err(); err != nil {
+			return convert.Document{}, err
 		}
 		sections = append(sections, convert.Section{Kind: convert.KindSheet, Number: number + 1, Name: sheet, Start: start, End: w.Len()})
 	}
@@ -134,8 +142,8 @@ func checkExpanded(entries []*zip.File, maxExpanded int64) error {
 	return nil
 }
 
-// sheet renders one sheet as a table, or "" when it is hidden or empty.
-func (c *Converter) sheet(ctx context.Context, file *excelize.File, sheet string, limits convert.Limits) (string, error) {
+// sheet renders one sheet into table, or returns "" when it is hidden or empty.
+func (c *Converter) sheet(ctx context.Context, file *excelize.File, sheet string, table *mdwrite.Table) (string, error) {
 	// A sheet whose visibility cannot be read is treated as visible.
 	if visible, err := file.GetSheetVisible(sheet); err == nil && !visible && !c.opts.IncludeHidden {
 		return "", nil
@@ -145,7 +153,6 @@ func (c *Converter) sheet(ctx context.Context, file *excelize.File, sheet string
 		return "", fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
 	defer func() { _ = rows.Close() }()
-	table := mdwrite.NewTable(limits.MaxOutputBytes, true)
 	for count := 0; rows.Next(); count++ {
 		if count%1024 == 0 {
 			if err := ctx.Err(); err != nil {
