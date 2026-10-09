@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/runforyou-ai/mdchunk/convert"
 )
@@ -47,6 +48,22 @@ func TestTableLimit(t *testing.T) {
 	}
 	if blank.Markdown() != "" {
 		t.Errorf("blank table = %q", blank.Markdown())
+	}
+}
+
+func TestTableWithin(t *testing.T) {
+	table := NewTableWithin(18, 100, true)
+	err := errors.Join(table.Add([]string{"A"}), table.Add([]string{"B"}))
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Max != 100 {
+		t.Errorf("err = %v, want a limit of 100", err)
+	}
+	// Repeated cells share their escaped text.
+	cell := strings.Repeat("|", 1000)
+	shared := NewTable(-1, true)
+	_ = shared.Add([]string{cell, cell})
+	if a, b := shared.header[0], shared.header[1]; a != Cell(cell) || unsafe.StringData(a) != unsafe.StringData(b) {
+		t.Error("repeated cell escaped twice")
 	}
 }
 

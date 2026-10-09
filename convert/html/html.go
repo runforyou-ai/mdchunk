@@ -7,7 +7,8 @@
 // limits and kept within their row group) repeat their cell, short rows are
 // padded, and a heuristic score of the copies must fit
 // Limits.MaxExpandedBytes; a table containing another table is left to the
-// converter, which renders it as text around the inner table. A
+// converter, which renders it as text around the inner table. Block quotes
+// and lists nested deeper than 8 levels render at the eighth. A
 // table without header cells promotes its first row, and relative links
 // resolve against Input.BaseURL.
 package html
@@ -24,6 +25,7 @@ import (
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/table"
 	xhtml "golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 	"golang.org/x/text/encoding"
 
 	"github.com/runforyou-ai/mdchunk/convert"
@@ -79,6 +81,7 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
+	limitNesting(doc)
 	if err := prepareTables(doc, limits.MaxExpandedBytes, in.BaseURL); err != nil {
 		return convert.Document{}, err
 	}
@@ -101,6 +104,45 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		return convert.Document{}, err
 	}
 	return convert.Document{Markdown: w.String()}, nil
+}
+
+// maxNesting is the deepest nesting of block quotes and lists that is kept.
+// Each level prefixes or indents every line inside it, and the converter
+// rewrites the inner Markdown once per level.
+const maxNesting = 8
+
+// nesting are the elements whose nesting maxNesting bounds.
+var nesting = map[atom.Atom]bool{atom.Blockquote: true, atom.Ul: true, atom.Ol: true, atom.Menu: true}
+
+// limitNesting turns block quotes and lists nested deeper than maxNesting,
+// and the items of such lists, into div elements, so their content renders
+// at the deepest kept level.
+func limitNesting(doc *xhtml.Node) {
+	type frame struct {
+		node  *xhtml.Node
+		depth int
+	}
+	stack := []frame{{doc, 0}}
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for child := current.node.LastChild; child != nil; child = child.PrevSibling {
+			depth := current.depth
+			if child.Type == xhtml.ElementNode && nesting[child.DataAtom] {
+				depth++
+				if depth > maxNesting {
+					flattened := child.DataAtom != atom.Blockquote
+					child.DataAtom, child.Data = atom.Div, "div"
+					for item := child.FirstChild; item != nil && flattened; item = item.NextSibling {
+						if item.Type == xhtml.ElementNode && item.DataAtom == atom.Li {
+							item.DataAtom, item.Data = atom.Div, "div"
+						}
+					}
+				}
+			}
+			stack = append(stack, frame{child, depth})
+		}
+	}
 }
 
 // metaCharset returns the charset declared by the first <meta> before <body>, or "".

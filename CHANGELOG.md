@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Word, PowerPoint and Excel parts nesting elements deeper than 256 levels
+  are `ErrCorrupt` instead of overflowing the stack; character data is collected
+  in linear time and parsing observes cancellation.
+- Each parsed Word and PowerPoint XML element counts 64 bytes against
+  `MaxExpandedBytes` on top of its bytes; relationship parts read before
+  they are checked are bounded by the whole limit.
+- Word, PowerPoint and Excel output is charged block by block and row by
+  row against `MaxOutputBytes`, and spanned table cells share one escaped
+  copy.
+- PowerPoint chart caches are read sparsely; scatter and bubble tables no
+  longer emit rows for point indices no series holds.
+- PDF: `Options.MaxPages` (default 10000) and `Options.MaxPageChars` (default
+  1 Mi) with the new `convert.LimitPages` and `convert.LimitPageChars`;
+  characters are read one at a time with cancellation and line text is
+  charged against `MaxOutputBytes` as it is read.
+- HTML: block quotes and lists nested deeper than 8 levels render at the
+  eighth level.
+
 ## v0.1.0
 
 - Package `split`: structure-aware Markdown splitter with byte-range chunks,

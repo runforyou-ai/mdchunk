@@ -180,6 +180,31 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+func TestPageLimits(t *testing.T) {
+	c := pdf.New(pdf.Options{MaxPages: 2, MaxPageChars: 50, Limits: convert.Limits{MaxOutputBytes: 80}})
+	defer func() { _ = c.Close() }()
+	page := func(chars int) []pdftest.Text { return []pdftest.Text{pdftest.L(12, 700, strings.Repeat("x", chars))} }
+	for name, tc := range map[string]struct {
+		pages [][]pdftest.Text
+		limit string
+		max   int64
+	}{
+		"within":          {[][]pdftest.Text{page(30), page(30)}, "", 0},
+		"pages":           {[][]pdftest.Text{page(1), page(1), page(1)}, convert.LimitPages, 2},
+		"page chars":      {[][]pdftest.Text{page(10), page(60)}, convert.LimitPageChars, 50},
+		"text over limit": {[][]pdftest.Text{page(45), page(45)}, convert.LimitOutput, 80},
+	} {
+		_, err := c.Convert(context.Background(), convert.Input{Reader: bytes.NewReader(pdftest.Build(t, tc.pages, ""))})
+		var limit *convert.LimitError
+		switch {
+		case tc.limit == "" && err != nil:
+			t.Errorf("%s: %v", name, err)
+		case tc.limit != "" && (!errors.As(err, &limit) || limit.Limit != tc.limit || limit.Max != tc.max):
+			t.Errorf("%s: err = %v, want the %s limit of %d", name, err, tc.limit, tc.max)
+		}
+	}
+}
+
 func TestLifecycle(t *testing.T) {
 	data := pdftest.Build(t, [][]pdftest.Text{{pdftest.L(12, 700, "hello")}}, "")
 	c := pdf.New(pdf.Options{Workers: 1})

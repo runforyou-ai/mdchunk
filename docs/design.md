@@ -301,7 +301,7 @@ func (r *Registry) Convert(ctx context.Context, f Format, in Input) (Document, e
 // Zero fields take the defaults; negative fields disable the limit.
 type Limits struct {
 	MaxBytes         int64 // source bytes read; default 32 MiB
-	MaxExpandedBytes int64 // decompressed archive bytes and HTML table copies; default 128 MiB
+	MaxExpandedBytes int64 // decompressed archive bytes, parsed OOXML elements and HTML table copies; default 128 MiB
 	MaxOutputBytes   int64 // Markdown bytes produced; default 64 MiB
 }
 
@@ -318,7 +318,7 @@ var (
 
 // LimitError reports which limit was exceeded; errors.Is(err, ErrTooLarge) holds.
 type LimitError struct {
-	Limit string // "source", "expanded" or "output"
+	Limit string // "source", "expanded", "output", or the PDF "pages" and "page_chars"
 	Max   int64
 }
 ```
@@ -343,11 +343,20 @@ type LimitError struct {
   XLSX, PDF) is `ErrCorrupt`. A valid PDF without a text layer yields empty
   Markdown and one empty page section per page.
 - Sources are read up to `MaxBytes+1` to detect `MaxBytes` overflow. Output is
-  limited while it is built, not after; where a third-party library builds the
-  output, the input to it is bounded first (see `convert/html`).
-- Cancellation is checked between reads, while waiting for a worker, and per
-  page, slide, sheet, row or block. A blocked `Read` or a single third-party
-  call is not interrupted.
+  limited while it is built, not after: every block, table row and line of
+  text is charged as it is added, so a document cannot build far more than
+  the limit before failing. Where a third-party library builds the output,
+  the input to it is bounded first (see `convert/html`).
+- XML parts of Word and PowerPoint documents are parsed into a tree with at
+  most 256 levels of nesting, deeper parts being `ErrCorrupt`; each element
+  is charged 64 bytes against `MaxExpandedBytes` on top of its bytes, so the
+  parsed tree stays within about twice the limit. Character data is collected
+  in linear time. Every walk over the tree is bounded by that depth. Excel
+  parts are checked for the same depth before the spreadsheet library reads
+  them; that library decodes some of them recursively.
+- Cancellation is checked between reads, while waiting for a worker, between
+  XML tokens and PDF characters in batches, and per page, slide, sheet, row or
+  block. A blocked `Read` or a single third-party call is not interrupted.
 - Built-in converters are safe for concurrent use. A custom converter is
   responsible for its own safety; the Registry releases its lock before calling.
 
@@ -384,8 +393,12 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   of copied text or attribute whether rendered or not, links and images also
   charged `Input.BaseURL`) is charged against what is left of
   `MaxExpandedBytes`, or the conversion fails with an expanded `LimitError`.
-  The score approximates conversion work and is not a hard memory bound. The
-  output limit applies to the final Markdown.
+  The score approximates conversion work and is not a hard memory bound. Block
+  quotes and lists nested deeper than 8 levels become plain blocks at the
+  deepest kept level, because each level indents every line inside it and the
+  library rewrites the inner Markdown once per level; the parser already
+  rejects more than 512 open elements as `ErrCorrupt`. The output limit
+  applies to the final Markdown.
   A table without header cells promotes its first
   row; relative links resolve against `Input.BaseURL`. A table whose cells
   contain another table is not expanded; the underlying library renders it as
@@ -398,11 +411,15 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   table (and the splitter gives no `TableHeader`).
 - `convert/docx`: `docx.New(opts)`. Headings from outline levels and heading
   styles, numbered and bulleted lists, tables (horizontal spans repeated,
-  vertical merges carry the value down), external hyperlinks. No sections.
+  vertical merges carry the value down), external hyperlinks; a hyperlink
+  inside another's label is its text. No sections.
   Encrypted files (an OLE compound file, not a zip) return `ErrEncrypted`.
 - `convert/pptx`: `pptx.New(opts)`. One `KindSlide` section per slide, the title
   placeholder as a level-1 heading, text boxes, tables, chart data as tables
-  and speaker notes. `SkipNotes`, `IncludeHidden` options.
+  and speaker notes. `SkipNotes`, `IncludeHidden` options. Chart caches are
+  read sparsely: a category table has one row per point index any series or
+  the categories hold, a scatter or bubble table one row per point index a
+  series holds, and indices beyond 65535 are ignored.
 - `convert/xlsx`: `xlsx.New(opts)`. One `KindSheet` section per sheet with the
   sheet name as a level-2 heading and a table; empty rows skipped. Displayed
   (number-formatted) values by default, `RawValues` for stored values;
@@ -424,7 +441,16 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
   size changes. Multi-column layout and table recovery are not attempted.
   Documents that need a password to open return `ErrEncrypted`; documents
   restricted only by an owner password convert normally, and permission flags
-  are not checked.
+  are not checked. `MaxPages` (default 10000) bounds the page count before any
+  page is read and `MaxPageChars` (default 1 Mi) the characters PDFium
+  reports for one page, generated spaces and line breaks included; both fail
+  with a `LimitError` and negative values disable them. Characters are read
+  one at a time, cancellation is checked between them in batches, and the
+  line text gathered so far is charged against `MaxOutputBytes` as it grows.
+  PDFium parses a page's content and builds its text page in single calls
+  that cannot be interrupted, in WebAssembly memory outside the Go heap;
+  `MaxPageChars` is checked only after that, so the source limit is what
+  bounds that work.
 - `convert/all`: `all.New(opts) *all.Registry`. Embeds `*convert.Registry`
   with every format above registered, and `Close` releases the converters it
   created (the PDF pool), not ones registered later. `all.Options` also has

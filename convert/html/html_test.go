@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -162,6 +163,33 @@ func TestNestedTableOuterBecomesText(t *testing.T) {
 	spanned := `<table><tr><td colspan=1000><table><tr><td>i</td></tr></table></td></tr></table>`
 	if got := run(t, convert.Input{Reader: strings.NewReader(spanned)}); strings.Count(got, "| i |") != 1 {
 		t.Errorf("spanned outer table repeats the inner table:\n%s", got)
+	}
+}
+
+func TestNestingIsBounded(t *testing.T) {
+	lines := strings.Repeat("x<br>", 2000)
+	for _, open := range []string{"<blockquote>", "<ul><li>", "<ol><li>", "<blockquote><ul><li>"} {
+		source := strings.Repeat(open, 100) + lines
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		markdown := run(t, convert.Input{Reader: strings.NewReader(source)})
+		runtime.ReadMemStats(&after)
+		if bytes := after.TotalAlloc - before.TotalAlloc; bytes > 64<<20 {
+			t.Errorf("%s: allocated %d MiB", open, bytes>>20)
+		}
+		if got := strings.Count(markdown, "x"); got != 2000 {
+			t.Errorf("%s: %d lines of text, want 2000", open, got)
+		}
+		// Each kept level adds at most three bytes before a line's text.
+		for line := range strings.SplitSeq(markdown, "\n") {
+			if prefix := strings.IndexByte(line, 'x'); prefix > 3*8 {
+				t.Fatalf("%s: line %q is nested deeper than 8 levels", open, line)
+			}
+		}
+	}
+	// Up to 8 levels are kept.
+	if got := run(t, convert.Input{Reader: strings.NewReader(strings.Repeat("<blockquote>", 8) + "q")}); got != strings.Repeat("> ", 8)+"q" {
+		t.Errorf("8 levels: %q", got)
 	}
 }
 

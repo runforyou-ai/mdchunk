@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -226,6 +227,71 @@ func TestLimits(t *testing.T) {
 	cancel()
 	if _, err := docx.New(docx.Options{}).Convert(ctx, convert.Input{Reader: bytes.NewReader(data)}); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled: %v", err)
+	}
+}
+
+func TestOutputLimitIsExact(t *testing.T) {
+	cell := `<w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr>` + p(``, "格") + `</w:tc>`
+	data := document(t, p(``, "一")+`<w:tbl><w:tr>`+cell+`</w:tr></w:tbl>`+p(``, "二"))
+	doc, err := convertData(t, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := int64(len(doc.Markdown))
+	if _, err := docx.New(docx.Options{Limits: convert.Limits{MaxOutputBytes: size}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); err != nil {
+		t.Errorf("at the limit: %v", err)
+	}
+	_, err = docx.New(docx.Options{Limits: convert.Limits{MaxOutputBytes: size - 1}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != size-1 {
+		t.Errorf("one byte over: %v", err)
+	}
+}
+
+// allocated returns the bytes f allocates.
+func allocated(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestSpannedCellsStopAtOutputLimit(t *testing.T) {
+	// Each table fits the output limit alone; conversion stops at the first
+	// table that does not fit what is left, and spanned copies share memory.
+	cell := `<w:tc><w:tcPr><w:gridSpan w:val="60"/></w:tcPr>` + p(``, strings.Repeat("x", 16<<10)) + `</w:tc>`
+	data := document(t, strings.Repeat(`<w:tbl><w:tr>`+cell+`</w:tr></w:tbl>`, 100))
+	var err error
+	if bytes := allocated(func() {
+		_, err = docx.New(docx.Options{Limits: convert.Limits{MaxOutputBytes: 1500 << 10}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+	}); bytes > 32<<20 {
+		t.Errorf("allocated %d MiB", bytes>>20)
+	}
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput {
+		t.Fatalf("err = %v, want the output limit", err)
+	}
+}
+
+func TestDeepNesting(t *testing.T) {
+	deep := strings.Repeat("<x>", 1<<20) + strings.Repeat("</x>", 1<<20)
+	for name, body := range map[string]string{
+		"body":      deep,
+		"paragraph": `<w:p>` + deep + `</w:p>`,
+	} {
+		if _, err := convertData(t, document(t, body)); !errors.Is(err, convert.ErrCorrupt) {
+			t.Errorf("%s: err = %v, want ErrCorrupt", name, err)
+		}
+	}
+}
+
+func TestNestedHyperlinks(t *testing.T) {
+	link := func(inner string) string { return `<w:hyperlink r:id="rId1">` + inner + `</w:hyperlink>` }
+	body := `<w:p>` + link(`<w:r><w:t>外</w:t></w:r>`+link(`<w:r><w:t>内</w:t></w:r>`)) + `</w:p>`
+	doc, err := convertData(t, document(t, body))
+	if want := "[外内](<https://example.com/a>)"; err != nil || doc.Markdown != want {
+		t.Errorf("got %q, %v; want %q", doc.Markdown, err, want)
 	}
 }
 

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"path"
 	"strings"
 
@@ -34,12 +33,27 @@ var oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
 // encryptionInfo is the UTF-16LE name of the stream an encrypted OOXML container holds.
 var encryptionInfo = []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00i\x00o\x00n\x00I\x00n\x00f\x00o\x00")
 
+// MaxDepth is the deepest element nesting a part may have; deeper parts are
+// reported as convert.ErrCorrupt. Office applications nest far less.
+const MaxDepth = 256
+
+// ElementCost is what each element of a parsed part counts against the
+// expansion limit in addition to its bytes. A parsed element takes about
+// twice that, so the parsed tree stays within about twice the limit.
+const ElementCost = 64
+
 // Node is an XML element with local names; Text is its direct character data.
 type Node struct {
 	Name     string
-	Attrs    map[string]string
+	attrs    []attr
 	Children []*Node
 	Text     string
+}
+
+// attr is an attribute keyed by its local name, or "r:" and its local name
+// for relationship attributes.
+type attr struct {
+	key, value string
 }
 
 // Child returns the first child named name, or nil.
@@ -68,7 +82,13 @@ func (n *Node) Attr(name string) string {
 	if n == nil {
 		return ""
 	}
-	return n.Attrs[name]
+	// The last of repeated attributes wins.
+	for i := len(n.attrs) - 1; i >= 0; i-- {
+		if n.attrs[i].key == name {
+			return n.attrs[i].value
+		}
+	}
+	return ""
 }
 
 // Relationship is a part relationship; Type is the last segment of the type URI and
@@ -81,9 +101,49 @@ type Relationship struct {
 
 // Package is an open OOXML package.
 type Package struct {
-	archive   *zip.Reader
-	max       int64
-	remaining int64
+	archive *zip.Reader
+	max     int64
+	budget  *budget // nil when unlimited
+}
+
+// budget is what is left of an expansion limit.
+type budget struct {
+	max, left int64
+}
+
+// spend charges n against b, returning an expanded *convert.LimitError once
+// more than the limit has been spent. A nil budget is unlimited.
+func (b *budget) spend(n int64) error {
+	if b == nil {
+		return nil
+	}
+	if n > b.left {
+		b.left = -1
+		return &convert.LimitError{Limit: convert.LimitExpanded, Max: b.max}
+	}
+	b.left -= n
+	return nil
+}
+
+// meteredReader charges the bytes it reads against a budget and keeps the
+// first limit error.
+type meteredReader struct {
+	r      io.Reader
+	budget *budget
+	err    error
+}
+
+// Read reads from the underlying reader and charges what it returns.
+func (m *meteredReader) Read(p []byte) (int, error) {
+	if m.err != nil {
+		return 0, m.err
+	}
+	n, err := m.r.Read(p)
+	if spendErr := m.budget.spend(int64(n)); spendErr != nil {
+		m.err = spendErr
+		return n, spendErr
+	}
+	return n, err
 }
 
 // Open opens data as an OOXML package. maxExpanded < 0 means unlimited.
@@ -110,7 +170,11 @@ func Open(data []byte, maxExpanded int64) (*Package, error) {
 		}
 		names[name] = true
 	}
-	return &Package{archive: archive, max: maxExpanded, remaining: maxExpanded}, nil
+	pkg := &Package{archive: archive, max: maxExpanded}
+	if maxExpanded >= 0 {
+		pkg.budget = &budget{max: maxExpanded, left: maxExpanded}
+	}
+	return pkg, nil
 }
 
 // Files returns the package entries.
@@ -119,13 +183,24 @@ func (p *Package) Files() []*zip.File {
 }
 
 // ReadPart parses the XML part at name, or returns nil when it is missing.
-// Reads count against the expansion limit.
-func (p *Package) ReadPart(name string) (*Node, error) {
-	return p.readPart(name, true)
+// Its bytes and elements count against the expansion limit; cancellation is
+// checked between tokens in batches.
+func (p *Package) ReadPart(ctx context.Context, name string) (*Node, error) {
+	return p.readPart(ctx, name, p.budget)
 }
 
-// readPart parses the XML part at name; counted reads count against the expansion limit.
-func (p *Package) readPart(name string, counted bool) (*Node, error) {
+// uncounted returns a budget of the whole expansion limit for a read that is
+// counted again later, or nil when the package is unlimited.
+func (p *Package) uncounted() *budget {
+	if p.budget == nil {
+		return nil
+	}
+	return &budget{max: p.max, left: p.max}
+}
+
+// readPart parses the XML part at name, charging its bytes and elements to b.
+// Parts nesting elements deeper than MaxDepth return convert.ErrCorrupt.
+func (p *Package) readPart(ctx context.Context, name string, b *budget) (*Node, error) {
 	file, err := p.archive.Open(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -134,53 +209,74 @@ func (p *Package) readPart(name string, counted bool) (*Node, error) {
 		return nil, fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
 	defer func() { _ = file.Close() }()
-	var reader io.Reader = file
-	var limited *io.LimitedReader
-	if counted && p.max >= 0 && p.remaining < math.MaxInt64 {
-		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
-		reader = limited
-		defer func() { p.remaining = max(limited.N-1, 0) }()
-	}
+	reader := &meteredReader{r: file, budget: b}
 	decoder := xml.NewDecoder(reader)
 	root := &Node{}
-	stack := []*Node{root}
-	for {
+	// texts[i] collects the character data of stack[i] until the element ends.
+	stack, texts := []*Node{root}, [][]byte{nil}
+	for count := 0; ; count++ {
+		if count%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		token, err := decoder.Token()
-		if limited != nil && limited.N == 0 {
-			return nil, &convert.LimitError{Limit: convert.LimitExpanded, Max: p.max}
+		if reader.err != nil {
+			return nil, reader.err
 		}
 		if errors.Is(err, io.EOF) {
-			return root, nil
+			break
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s: %w", convert.ErrCorrupt, name, err)
 		}
 		switch token := token.(type) {
 		case xml.StartElement:
-			node := &Node{Name: token.Name.Local, Attrs: make(map[string]string, len(token.Attr))}
-			for _, attr := range token.Attr {
-				key := attr.Name.Local
-				if relationshipNamespaces[attr.Name.Space] {
+			if len(stack) > MaxDepth {
+				return nil, fmt.Errorf("%w: %s nests elements deeper than %d", convert.ErrCorrupt, name, MaxDepth)
+			}
+			if err := b.spend(ElementCost); err != nil {
+				return nil, err
+			}
+			node := &Node{Name: token.Name.Local}
+			if len(token.Attr) > 0 {
+				node.attrs = make([]attr, len(token.Attr))
+			}
+			for i, a := range token.Attr {
+				key := a.Name.Local
+				if relationshipNamespaces[a.Name.Space] {
 					key = "r:" + key
 				}
-				node.Attrs[key] = attr.Value
+				node.attrs[i] = attr{key: key, value: a.Value}
 			}
 			parent := stack[len(stack)-1]
 			parent.Children = append(parent.Children, node)
 			stack = append(stack, node)
+			if len(texts) < len(stack) {
+				texts = append(texts, nil)
+			}
+			texts[len(stack)-1] = texts[len(stack)-1][:0]
 		case xml.EndElement:
 			if len(stack) > 1 {
-				stack = stack[:len(stack)-1]
+				top := len(stack) - 1
+				stack[top].Text = string(texts[top])
+				stack = stack[:top]
 			}
 		case xml.CharData:
-			stack[len(stack)-1].Text += string(token)
+			top := len(stack) - 1
+			texts[top] = append(texts[top], token...)
 		}
 	}
+	for i, node := range stack {
+		node.Text = string(texts[i])
+	}
+	return root, nil
 }
 
 // CheckXML reads the XML part at name to its end without keeping it and
 // returns convert.ErrCorrupt when it is not well-formed: mismatched or
-// unclosed elements, other than one root element, or text outside it. Reads count against
+// unclosed elements, other than one root element, text outside it, or
+// elements nested deeper than MaxDepth. Reads count against
 // the expansion limit; cancellation is checked between tokens in batches.
 func (p *Package) CheckXML(ctx context.Context, name string) error {
 	file, err := p.archive.Open(name)
@@ -188,13 +284,7 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 		return fmt.Errorf("%w: %w", convert.ErrCorrupt, err)
 	}
 	defer func() { _ = file.Close() }()
-	var reader io.Reader = file
-	var limited *io.LimitedReader
-	if p.max >= 0 && p.remaining < math.MaxInt64 {
-		limited = &io.LimitedReader{R: file, N: p.remaining + 1}
-		reader = limited
-		defer func() { p.remaining = max(limited.N-1, 0) }()
-	}
+	reader := &meteredReader{r: file, budget: p.budget}
 	decoder := xml.NewDecoder(reader)
 	depth, roots := 0, 0
 	for count := 0; ; count++ {
@@ -204,8 +294,8 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 			}
 		}
 		token, err := decoder.Token()
-		if limited != nil && limited.N == 0 {
-			return &convert.LimitError{Limit: convert.LimitExpanded, Max: p.max}
+		if reader.err != nil {
+			return reader.err
 		}
 		if errors.Is(err, io.EOF) {
 			if roots != 1 {
@@ -220,6 +310,9 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 		case xml.StartElement:
 			if depth == 0 {
 				roots++
+			}
+			if depth >= MaxDepth {
+				return fmt.Errorf("%w: %s nests elements deeper than %d", convert.ErrCorrupt, name, MaxDepth)
 			}
 			depth++
 		case xml.EndElement:
@@ -269,7 +362,7 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 	}
-	types, err := p.readPart(contentTypes, false)
+	types, err := p.readPart(ctx, contentTypes, p.uncounted())
 	if err != nil {
 		return nil, err
 	}
@@ -293,8 +386,8 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 		}
 		return defaults[strings.TrimPrefix(path.Ext(lower), ".")]
 	}
-	// Relationship targets are found from relationship parts read without counting;
-	// those parts are XML and are checked, and counted, like any other.
+	// Relationship targets are found from relationship parts read under a budget of
+	// their own; those parts are XML and are checked, and counted, like any other.
 	targets := map[string]bool{} // target -> always checked
 	var required [][2]string     // both resolutions of each core relationship target
 	for _, entry := range p.archive.File {
@@ -302,7 +395,7 @@ func (p *Package) XMLParts(ctx context.Context) ([]string, error) {
 		if !strings.HasSuffix(name, ".rels") {
 			continue
 		}
-		root, err := p.readPart(name, false)
+		root, err := p.readPart(ctx, name, p.uncounted())
 		if err != nil {
 			return nil, err
 		}
@@ -399,11 +492,11 @@ func looksLikeXML(entry *zip.File) bool {
 
 // RequirePart is ReadPart for a part the document cannot do without; a missing
 // part returns convert.ErrCorrupt.
-func (p *Package) RequirePart(name string) (*Node, error) {
+func (p *Package) RequirePart(ctx context.Context, name string) (*Node, error) {
 	if name == "" {
 		return nil, fmt.Errorf("%w: missing relationship target", convert.ErrCorrupt)
 	}
-	root, err := p.ReadPart(name)
+	root, err := p.ReadPart(ctx, name)
 	if err == nil && root == nil {
 		return nil, fmt.Errorf("%w: missing part %s", convert.ErrCorrupt, name)
 	}
@@ -412,9 +505,9 @@ func (p *Package) RequirePart(name string) (*Node, error) {
 
 // Relationships reads the relationships of part. Internal targets resolve against
 // the part's directory, or the package root when they start with a slash.
-func (p *Package) Relationships(part string) (map[string]Relationship, error) {
+func (p *Package) Relationships(ctx context.Context, part string) (map[string]Relationship, error) {
 	directory, name := path.Split(part)
-	root, err := p.ReadPart(directory + "_rels/" + name + ".rels")
+	root, err := p.ReadPart(ctx, directory+"_rels/"+name+".rels")
 	if err != nil {
 		return nil, err
 	}

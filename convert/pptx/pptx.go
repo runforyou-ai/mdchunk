@@ -47,6 +47,9 @@ type slide struct {
 	relationships map[string]ooxml.Relationship
 	limits        convert.Limits
 	title         string
+	// output is the output budget left for the slide's blocks and their
+	// separators; negative means unlimited.
+	output int64
 }
 
 // Convert converts in to Markdown with one section per slide.
@@ -63,14 +66,14 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	if err != nil {
 		return convert.Document{}, err
 	}
-	presentation, err := pkg.RequirePart("ppt/presentation.xml")
+	presentation, err := pkg.RequirePart(ctx, "ppt/presentation.xml")
 	if err != nil {
 		return convert.Document{}, err
 	}
 	if presentation.Child("presentation") == nil {
 		return convert.Document{}, fmt.Errorf("%w: ppt/presentation.xml has no presentation", convert.ErrCorrupt)
 	}
-	relationships, err := pkg.Relationships("ppt/presentation.xml")
+	relationships, err := pkg.Relationships(ctx, "ppt/presentation.xml")
 	if err != nil {
 		return convert.Document{}, err
 	}
@@ -82,7 +85,15 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 			continue
 		}
 		number++
-		blocks, title, err := c.slide(ctx, pkg, relationships[item.Attr("r:id")].Target, limits)
+		// The slide may take what is left after the separator before it.
+		output := int64(-1)
+		if limits.MaxOutputBytes >= 0 {
+			output = limits.MaxOutputBytes - int64(w.Len())
+			if w.Len() > 0 {
+				output = max(output-2, 0)
+			}
+		}
+		blocks, title, err := c.slide(ctx, pkg, relationships[item.Attr("r:id")].Target, limits, output)
 		if err != nil {
 			return convert.Document{}, err
 		}
@@ -92,6 +103,9 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 		}
 		start := w.Len()
 		w.WriteString(strings.Join(blocks, "\n\n"))
+		if err := w.Err(); err != nil {
+			return convert.Document{}, err
+		}
 		sections = append(sections, convert.Section{Kind: convert.KindSlide, Number: number, Name: title, Start: start, End: w.Len()})
 	}
 	if err := w.Err(); err != nil {
@@ -103,12 +117,12 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	return convert.Document{Markdown: w.String(), Sections: sections}, nil
 }
 
-// slide renders the slide at target and returns its blocks and title.
-func (c *Converter) slide(ctx context.Context, pkg *ooxml.Package, target string, limits convert.Limits) ([]string, string, error) {
+// slide renders the slide at target within output bytes and returns its blocks and title.
+func (c *Converter) slide(ctx context.Context, pkg *ooxml.Package, target string, limits convert.Limits, output int64) ([]string, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	root, err := pkg.RequirePart(target)
+	root, err := pkg.RequirePart(ctx, target)
 	if err != nil {
 		return nil, "", err
 	}
@@ -118,11 +132,11 @@ func (c *Converter) slide(ctx context.Context, pkg *ooxml.Package, target string
 	if show := root.Child("sld").Attr("show"); (show == "0" || show == "false") && !c.opts.IncludeHidden {
 		return nil, "", nil
 	}
-	relationships, err := pkg.Relationships(target)
+	relationships, err := pkg.Relationships(ctx, target)
 	if err != nil {
 		return nil, "", err
 	}
-	s := &slide{ctx: ctx, pkg: pkg, relationships: relationships, limits: limits}
+	s := &slide{ctx: ctx, pkg: pkg, relationships: relationships, limits: limits, output: output}
 	var blocks []string
 	if err := s.blocks(root.Child("sld").Child("cSld").Child("spTree"), &blocks); err != nil {
 		return nil, "", err
@@ -142,14 +156,16 @@ func (c *Converter) slide(ctx context.Context, pkg *ooxml.Package, target string
 		if item.Type != "notesSlide" {
 			continue
 		}
-		notes, err := pkg.RequirePart(item.Target)
+		notes, err := pkg.RequirePart(ctx, item.Target)
 		if err != nil {
 			return nil, "", err
 		}
 		for _, shape := range notes.Child("notes").Child("cSld").Child("spTree").Elements() {
 			if shape.Name == "sp" && shape.Child("nvSpPr").Child("nvPr").Child("ph").Attr("type") == "body" {
 				if text := shapeText(shape); text != "" {
-					blocks = append(blocks, mdwrite.Paragraph(text))
+					if err := s.add(&blocks, mdwrite.Paragraph(text)); err != nil {
+						return nil, "", err
+					}
 				}
 			}
 		}
@@ -174,23 +190,23 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 				if s.title == "" {
 					s.title = title
 				}
-				*blocks = append(*blocks, "# "+title)
+				if err := s.add(blocks, "# "+title); err != nil {
+					return err
+				}
 				continue
 			}
-			*blocks = append(*blocks, mdwrite.Paragraph(text))
+			if err := s.add(blocks, mdwrite.Paragraph(text)); err != nil {
+				return err
+			}
 		case "graphicFrame":
 			data := shape.Child("graphic").Child("graphicData")
 			if chart := data.Child("chart"); chart != nil {
-				text, err := s.chart(s.relationships[chart.Attr("r:id")].Target)
-				if err != nil {
+				if err := s.chart(s.relationships[chart.Attr("r:id")].Target, blocks); err != nil {
 					return err
-				}
-				if text != "" {
-					*blocks = append(*blocks, text)
 				}
 				continue
 			}
-			table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
+			table := s.table(*blocks)
 			for _, row := range data.Child("tbl").Elements() {
 				if row.Name != "tr" {
 					continue
@@ -205,8 +221,8 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 					return err
 				}
 			}
-			if markdown := table.Markdown(); markdown != "" {
-				*blocks = append(*blocks, markdown)
+			if err := s.add(blocks, table.Markdown()); err != nil {
+				return err
 			}
 		case "grpSp":
 			if err := s.blocks(shape, blocks); err != nil {
@@ -221,13 +237,43 @@ func (s *slide) blocks(tree *ooxml.Node, blocks *[]string) error {
 	return nil
 }
 
-// chart renders a chart's title and data. Category series form one table with
-// categories in the first column and one column per series; scatter and
-// bubble series form a table with one row per point: series, x, y and size.
-func (s *slide) chart(target string) (string, error) {
-	root, err := s.pkg.RequirePart(target)
+// add appends a non-empty block, charging it and its separator against the output budget.
+func (s *slide) add(blocks *[]string, block string) error {
+	if block == "" {
+		return nil
+	}
+	if s.output >= 0 {
+		size := int64(len(block))
+		if len(*blocks) > 0 {
+			size += 2
+		}
+		if size > s.output {
+			return &convert.LimitError{Limit: convert.LimitOutput, Max: s.limits.MaxOutputBytes}
+		}
+		s.output -= size
+	}
+	*blocks = append(*blocks, block)
+	return nil
+}
+
+// table returns a table limited to what the output budget leaves once the
+// separator before it is added to blocks.
+func (s *slide) table(blocks []string) *mdwrite.Table {
+	left := s.output
+	if left >= 0 && len(blocks) > 0 {
+		left = max(left-2, 0)
+	}
+	return mdwrite.NewTableWithin(left, s.limits.MaxOutputBytes, true)
+}
+
+// chart adds a chart's title and data to blocks. Category series form one
+// table with categories in the first column and one column per series;
+// scatter and bubble series form a table with one row per point: series, x,
+// y and size. A chart without series adds nothing.
+func (s *slide) chart(target string, blocks *[]string) error {
+	root, err := s.pkg.RequirePart(s.ctx, target)
 	if err != nil {
-		return "", err
+		return err
 	}
 	chart := root.Child("chartSpace").Child("chart")
 	var categorySeries, pointSeries []*ooxml.Node
@@ -242,28 +288,31 @@ func (s *slide) chart(target string) (string, error) {
 			}
 		}
 	}
-	var blocks []string
-	if title := chartTitle(chart.Child("title")); title != "" {
-		blocks = append(blocks, mdwrite.Paragraph(title))
+	if len(categorySeries)+len(pointSeries) == 0 {
+		return nil
+	}
+	if err := s.add(blocks, mdwrite.Paragraph(chartTitle(chart.Child("title")))); err != nil {
+		return err
 	}
 	if len(categorySeries) > 0 {
-		table, err := s.categoryTable(categorySeries)
+		table, err := s.categoryTable(categorySeries, *blocks)
 		if err != nil {
-			return "", err
+			return err
 		}
-		blocks = append(blocks, table)
+		if err := s.add(blocks, table); err != nil {
+			return err
+		}
 	}
 	if len(pointSeries) > 0 {
-		table, err := s.pointTable(pointSeries)
+		table, err := s.pointTable(pointSeries, *blocks)
 		if err != nil {
-			return "", err
+			return err
 		}
-		blocks = append(blocks, table)
+		if err := s.add(blocks, table); err != nil {
+			return err
+		}
 	}
-	if len(categorySeries)+len(pointSeries) == 0 {
-		return "", nil
-	}
-	return strings.Join(blocks, "\n\n"), nil
+	return nil
 }
 
 // chartTitle returns a chart title from rich text or a cached string reference.
@@ -271,13 +320,18 @@ func chartTitle(title *ooxml.Node) string {
 	if text := strings.Join(strings.Fields(slideText(title)), " "); text != "" {
 		return text
 	}
-	return strings.Join(cacheValues(title.Child("tx")), " ")
+	cache := cacheValues(title.Child("tx"))
+	values := make([]string, 0, len(cache.values))
+	for _, index := range cache.indices() {
+		values = append(values, cache.values[index])
+	}
+	return strings.Join(values, " ")
 }
 
 // seriesName returns a series name from its reference cache or literal value.
 func seriesName(series *ooxml.Node) string {
-	if names := cacheValues(series.Child("tx")); len(names) > 0 {
-		return names[0]
+	if names := cacheValues(series.Child("tx")); names.length > 0 {
+		return names.values[0]
 	}
 	if value := series.Child("tx").Child("v"); value != nil {
 		return value.Text
@@ -285,33 +339,33 @@ func seriesName(series *ooxml.Node) string {
 	return ""
 }
 
-// categoryTable renders category series: categories in the first column, one column per series.
-func (s *slide) categoryTable(series []*ooxml.Node) (string, error) {
+// categoryTable renders category series: categories in the first column, one
+// column per series, one row per point index that any of them holds.
+// The table is limited to what the output budget leaves after blocks.
+func (s *slide) categoryTable(series []*ooxml.Node, blocks []string) (string, error) {
 	header := []string{""}
-	var columns [][]string
-	var labels []string
+	var columns []points
+	var labels points
 	for _, item := range series {
 		header = append(header, seriesName(item))
 		columns = append(columns, cacheValues(item.Child("val")))
-		if len(labels) == 0 {
+		if labels.length == 0 {
 			labels = cacheValues(item.Child("cat"))
 		}
 	}
-	table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
+	table := s.table(blocks)
 	if err := table.SetHeader(header); err != nil {
 		return "", err
 	}
-	count := len(labels)
-	for _, column := range columns {
-		count = max(count, len(column))
-	}
-	for index := range count {
-		if err := s.ctx.Err(); err != nil {
-			return "", err
+	for i, index := range union(append(columns, labels)) {
+		if i%1024 == 0 {
+			if err := s.ctx.Err(); err != nil {
+				return "", err
+			}
 		}
-		row := []string{at(labels, index)}
+		row := []string{labels.values[index]}
 		for _, column := range columns {
-			row = append(row, at(column, index))
+			row = append(row, column.values[index])
 		}
 		if err := table.Add(row); err != nil {
 			return "", err
@@ -320,27 +374,31 @@ func (s *slide) categoryTable(series []*ooxml.Node) (string, error) {
 	return table.Markdown(), nil
 }
 
-// pointTable renders scatter and bubble series with one row per point.
-func (s *slide) pointTable(series []*ooxml.Node) (string, error) {
+// pointTable renders scatter and bubble series with one row per point index
+// a series' x, y or size values hold.
+// The table is limited to what the output budget leaves after blocks.
+func (s *slide) pointTable(series []*ooxml.Node, blocks []string) (string, error) {
 	header := []string{"", "x", "y"}
 	bubbles := slices.ContainsFunc(series, func(item *ooxml.Node) bool { return item.Child("bubbleSize") != nil })
 	if bubbles {
 		header = append(header, "size")
 	}
-	table := mdwrite.NewTable(s.limits.MaxOutputBytes, true)
+	table := s.table(blocks)
 	if err := table.SetHeader(header); err != nil {
 		return "", err
 	}
 	for _, item := range series {
 		name := seriesName(item)
 		xs, ys, sizes := cacheValues(item.Child("xVal")), cacheValues(item.Child("yVal")), cacheValues(item.Child("bubbleSize"))
-		for index := range max(len(xs), len(ys), len(sizes)) {
-			if err := s.ctx.Err(); err != nil {
-				return "", err
+		for i, index := range union([]points{xs, ys, sizes}) {
+			if i%1024 == 0 {
+				if err := s.ctx.Err(); err != nil {
+					return "", err
+				}
 			}
-			row := []string{name, at(xs, index), at(ys, index)}
+			row := []string{name, xs.values[index], ys.values[index]}
 			if bubbles {
-				row = append(row, at(sizes, index))
+				row = append(row, sizes.values[index])
 			}
 			if err := table.Add(row); err != nil {
 				return "", err
@@ -350,37 +408,63 @@ func (s *slide) pointTable(series []*ooxml.Node) (string, error) {
 	return table.Markdown(), nil
 }
 
-// at returns values[index], or "" beyond its end.
-func at(values []string, index int) string {
-	if index < len(values) {
-		return values[index]
-	}
-	return ""
-}
-
 // maxPoints bounds the data point index read from a chart cache.
 const maxPoints = 1 << 16
 
-// cacheValues returns a chart cache's values by point index; missing points are empty.
-func cacheValues(node *ooxml.Node) []string {
-	var values []string
+// points are the values of a chart cache by point index. Missing points read
+// as empty; length is one past the highest index.
+type points struct {
+	values map[int]string
+	length int
+}
+
+// indices returns the point indices in increasing order.
+func (p points) indices() []int {
+	return union([]points{p})
+}
+
+// union returns the point indices any of caches holds, in increasing order.
+func union(caches []points) []int {
+	seen := map[int]bool{}
+	var indices []int
+	for _, cache := range caches {
+		for index := range cache.values {
+			if !seen[index] {
+				seen[index] = true
+				indices = append(indices, index)
+			}
+		}
+	}
+	slices.Sort(indices)
+	return indices
+}
+
+// cacheValues returns a chart cache's values by point index. Points of nested
+// caches follow those already read, as if appended.
+func cacheValues(node *ooxml.Node) points {
+	values := points{values: map[int]string{}}
+	values.read(node)
+	return values
+}
+
+// read adds the points under node, indexed from the current length.
+func (p *points) read(node *ooxml.Node) {
+	origin := p.length
 	for _, child := range node.Elements() {
 		if child.Name != "pt" {
-			values = append(values, cacheValues(child)...)
+			p.read(child)
 			continue
 		}
 		index, err := strconv.Atoi(child.Attr("idx"))
 		if err != nil || index < 0 || index >= maxPoints {
 			continue
 		}
-		for len(values) <= index {
-			values = append(values, "")
-		}
+		p.length = max(p.length, origin+index+1)
+		p.values[origin+index] = ""
 		if value := child.Child("v"); value != nil {
-			values[index] = value.Text
+			p.values[origin+index] = value.Text
 		}
 	}
-	return values
 }
 
 // shapeText returns the non-empty paragraphs of a shape, one per line.
@@ -397,6 +481,12 @@ func shapeText(shape *ooxml.Node) string {
 // slideText joins text runs and fields; line breaks become newlines and paragraphs are separated by spaces.
 func slideText(node *ooxml.Node) string {
 	var builder strings.Builder
+	writeSlideText(node, &builder)
+	return builder.String()
+}
+
+// writeSlideText appends the text slideText returns for node to builder.
+func writeSlideText(node *ooxml.Node, builder *strings.Builder) {
 	for _, child := range node.Elements() {
 		switch child.Name {
 		case "t":
@@ -404,11 +494,11 @@ func slideText(node *ooxml.Node) string {
 		case "br":
 			builder.WriteString("\n")
 		case "p":
-			builder.WriteString(slideText(child) + " ")
+			writeSlideText(child, builder)
+			builder.WriteString(" ")
 		case "pPr", "rPr", "endParaRPr":
 		default:
-			builder.WriteString(slideText(child))
+			writeSlideText(child, builder)
 		}
 	}
-	return builder.String()
 }
