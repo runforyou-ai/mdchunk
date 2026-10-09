@@ -98,10 +98,15 @@ func (c *Converter) render(ctx context.Context, data []byte, limits convert.Limi
 	w := mdwrite.New(limits.MaxOutputBytes)
 	var sections []convert.Section
 	for number, sheet := range file.GetSheetList() {
-		// A sheet's table may take what is left of the output limit.
+		// A sheet's table may take what is left of the output limit after the
+		// separator and the sheet heading before it.
 		left := int64(-1)
 		if limits.MaxOutputBytes >= 0 {
-			left = max(limits.MaxOutputBytes-int64(w.Len()), 0)
+			left = limits.MaxOutputBytes - int64(w.Len()+len("## "+mdwrite.Cell(sheet)+"\n\n"))
+			if w.Len() > 0 {
+				left -= 2
+			}
+			left = max(left, 0)
 		}
 		table, err := c.sheet(ctx, file, sheet, mdwrite.NewTableWithin(left, limits.MaxOutputBytes, true))
 		if err != nil {

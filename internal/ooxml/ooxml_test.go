@@ -47,6 +47,27 @@ func TestReadPartDepth(t *testing.T) {
 	}
 }
 
+func TestCheckXMLDepth(t *testing.T) {
+	if err := open(t, nested(ooxml.MaxDepth, ""), -1).CheckXML(context.Background(), "part.xml"); err != nil {
+		t.Fatalf("at the depth limit: %v", err)
+	}
+	for _, depth := range []int{ooxml.MaxDepth + 1, 1 << 20} {
+		if err := open(t, nested(depth, ""), -1).CheckXML(context.Background(), "part.xml"); !errors.Is(err, convert.ErrCorrupt) {
+			t.Fatalf("depth %d: err = %v, want ErrCorrupt", depth, err)
+		}
+	}
+}
+
+func TestRepeatedAttributeLastWins(t *testing.T) {
+	root, err := open(t, `<r a="1" a="2"/>`, -1).ReadPart(context.Background(), "part.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Child("r").Attr("a"); got != "2" {
+		t.Errorf("Attr = %q, want 2", got)
+	}
+}
+
 func TestReadPartTextIsLinear(t *testing.T) {
 	// Comments split character data into one token per byte.
 	const n = 1 << 18

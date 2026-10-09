@@ -351,7 +351,9 @@ type LimitError struct {
   most 256 levels of nesting, deeper parts being `ErrCorrupt`; each element
   is charged 64 bytes against `MaxExpandedBytes` on top of its bytes, so the
   parsed tree stays within about twice the limit. Character data is collected
-  in linear time. Every walk over the tree is bounded by that depth.
+  in linear time. Every walk over the tree is bounded by that depth. Excel
+  parts are checked for the same depth before the spreadsheet library,
+  which decodes some of them recursively, reads them.
 - Cancellation is checked between reads, while waiting for a worker, between
   XML tokens and PDF characters in batches, and per page, slide, sheet, row or
   block. A blocked `Read` or a single third-party call is not interrupted.

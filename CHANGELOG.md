@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Word and PowerPoint parts nesting elements deeper than 256 levels are
-  `ErrCorrupt` instead of overflowing the stack; character data is collected
+- Word, PowerPoint and Excel parts nesting elements deeper than 256 levels
+  are `ErrCorrupt` instead of overflowing the stack; character data is collected
   in linear time and parsing observes cancellation.
 - Each parsed Word and PowerPoint XML element counts 64 bytes against
   `MaxExpandedBytes` on top of its bytes; relationship parts read before

@@ -82,9 +82,10 @@ func (n *Node) Attr(name string) string {
 	if n == nil {
 		return ""
 	}
-	for _, a := range n.attrs {
-		if a.key == name {
-			return a.value
+	// The last of repeated attributes wins.
+	for i := len(n.attrs) - 1; i >= 0; i-- {
+		if n.attrs[i].key == name {
+			return n.attrs[i].value
 		}
 	}
 	return ""
@@ -274,7 +275,8 @@ func (p *Package) readPart(ctx context.Context, name string, b *budget) (*Node, 
 
 // CheckXML reads the XML part at name to its end without keeping it and
 // returns convert.ErrCorrupt when it is not well-formed: mismatched or
-// unclosed elements, other than one root element, or text outside it. Reads count against
+// unclosed elements, other than one root element, text outside it, or
+// elements nested deeper than MaxDepth. Reads count against
 // the expansion limit; cancellation is checked between tokens in batches.
 func (p *Package) CheckXML(ctx context.Context, name string) error {
 	file, err := p.archive.Open(name)
@@ -308,6 +310,9 @@ func (p *Package) CheckXML(ctx context.Context, name string) error {
 		case xml.StartElement:
 			if depth == 0 {
 				roots++
+			}
+			if depth >= MaxDepth {
+				return fmt.Errorf("%w: %s nests elements deeper than %d", convert.ErrCorrupt, name, MaxDepth)
 			}
 			depth++
 		case xml.EndElement:

@@ -90,6 +90,15 @@ func TestOutputLimitAcrossSheets(t *testing.T) {
 	}
 }
 
+func TestDeepNesting(t *testing.T) {
+	data := rezip(t, workbook(t), "xl/workbook.xml", func(content string) string {
+		return strings.Replace(content, "<sheets>", "<sheets>"+strings.Repeat("<x>", 1<<20)+strings.Repeat("</x>", 1<<20), 1)
+	})
+	if _, err := xlsx.New(xlsx.Options{}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)}); !errors.Is(err, convert.ErrCorrupt) {
+		t.Errorf("err = %v, want ErrCorrupt", err)
+	}
+}
+
 func TestOptions(t *testing.T) {
 	doc := run(t, xlsx.Options{RawValues: true, IncludeHidden: true}, workbook(t))
 	want := "## 销售\n\n| 地区 | 占比 | 备注 |\n| --- | --- | --- |\n| 华东 | 0.25 | a\\|b |\n| 华南 | 0.5 |  |\n\n## 隐藏\n\n| secret |\n| --- |"

@@ -211,6 +211,24 @@ func TestSparseChartPoints(t *testing.T) {
 	}
 }
 
+func TestOutputLimitIsExact(t *testing.T) {
+	point := `<c:pt idx="0"><c:v>1</c:v></c:pt>`
+	chart := `<c:chartSpace ` + ns + `><c:chart><c:title><c:tx><c:strRef><c:strCache>` + point + `</c:strCache></c:strRef></c:tx></c:title><c:plotArea>` +
+		`<c:barChart><c:ser><c:val><c:numCache>` + point + `</c:numCache></c:val></c:ser></c:barChart>` +
+		`<c:scatterChart><c:ser><c:xVal><c:numLit>` + point + `</c:numLit></c:xVal><c:yVal><c:numLit>` + point + `</c:numLit></c:yVal></c:ser></c:scatterChart>` +
+		`</c:plotArea></c:chart></c:chartSpace>`
+	files := deckFiles(nil, "", shape("title", "一")+chartFrame, shape("", "二"))
+	files["ppt/charts/chart1.xml"] = chart
+	data := ooxmltest.Build(t, files)
+	size := int64(len(run(t, pptx.Options{}, data).Markdown))
+	run(t, pptx.Options{Limits: convert.Limits{MaxOutputBytes: size}}, data)
+	_, err := pptx.New(pptx.Options{Limits: convert.Limits{MaxOutputBytes: size - 1}}).Convert(context.Background(), convert.Input{Reader: bytes.NewReader(data)})
+	var limit *convert.LimitError
+	if !errors.As(err, &limit) || limit.Limit != convert.LimitOutput || limit.Max != size-1 {
+		t.Errorf("one byte over: %v", err)
+	}
+}
+
 func TestDeepNesting(t *testing.T) {
 	deep := strings.Repeat("<x>", 1<<20) + strings.Repeat("</x>", 1<<20)
 	for name, data := range map[string][]byte{
