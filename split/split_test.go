@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -336,6 +337,106 @@ func TestStructuresAreNotHeadings(t *testing.T) {
 		checkContract(t, s, text, chunks)
 		if len(scan(text).headings) != 0 {
 			t.Errorf("%s: found headings %+v", name, scan(text).headings)
+		}
+	}
+}
+
+func TestFrontMatterNeedsYAML(t *testing.T) {
+	for name, tc := range map[string]struct {
+		text        string
+		frontMatter bool
+	}{
+		"keys":              {"---\ntitle: x\ntags:\n  - a\n- b\n# comment\n\nurl: http://e.com\n---\n# H\n", true},
+		"dots":              {"---\ntitle: x\n...\n# H\n", true},
+		"thematic breaks":   {"---\n\n# 第一章\n\n内容一。\n\n---\n\n# 第二章\n", false},
+		"comments only":     {"---\n# H\n---\n", false},
+		"prose with colon":  {"---\nNote: see below.\nMore prose here\n---\n# H\n", false},
+		"colon inside word": {"---\nhttp://e.com\n---\n# H\n", false},
+		"indented keys":     {"---\n  title: x\n# Metadata comment\n---\n\nbody\n", true},
+		"sequence only":     {"---\n- title: x\n---\n# H\n", false},
+		"indented sequence": {"---\n\n# 第一章\n\n  - 作者: 张三\n\n---\n", false},
+		"indented comment":  {"---\n\n# 第一章\n\n  # 作者: 张三\n\n---\n", false},
+		"nested key":        {"---\nauthor:\n    name: x\n---\n", true},
+		// A "#" line reads as a YAML comment, so a heading followed by a key-like line is front matter.
+		"heading and key": {"---\n# 第一章\n作者: 张三\n---\n# 第二章\n", true},
+	} {
+		end := scan(tc.text).frontMatterEnd(splitLines(tc.text))
+		if (end >= 0) != tc.frontMatter {
+			t.Errorf("%s: front matter end %d, want front matter %v", name, end, tc.frontMatter)
+		}
+	}
+	// Chapters between thematic breaks keep their heading paths.
+	s := mustNew(t, Options{Size: 4})
+	text := "---\n\n# 第一章\n\n内容一。\n\n---\n\n# 第二章\n\n内容二。\n"
+	chunks := s.Split(text)
+	checkContract(t, s, text, chunks)
+	var paths []string
+	for _, c := range chunks {
+		if strings.HasPrefix(strings.TrimSpace(c.Text), "内容") {
+			paths = append(paths, strings.Join(headingTexts(c), " > "))
+		}
+	}
+	if want := []string{"第一章", "第二章"}; !slices.Equal(paths, want) {
+		t.Errorf("heading paths = %q, want %q", paths, want)
+	}
+	// Without front matter, a "---" right under a paragraph underlines it as a setext heading.
+	text = "---\n\n# 第一章\n\n内容一。\n---\n\n后续正文\n"
+	chunks = s.Split(text)
+	checkContract(t, s, text, chunks)
+	last := chunks[len(chunks)-1]
+	if got, want := strings.Join(headingTexts(last), " > "), "第一章 > 内容一。"; got != want {
+		t.Errorf("setext: last chunk %q under %q, want %q", last.Text, got, want)
+	}
+}
+
+func TestGraphemeClustersStayWhole(t *testing.T) {
+	for name, text := range map[string]string{
+		"family emoji": strings.Repeat("👨‍👩‍👧‍👦", 100),
+		"flags":        strings.Repeat("🇨🇳", 300),
+		"skin tones":   strings.Repeat("👍🏽", 300),
+		"combining":    strings.Repeat("e\u0301", 300),
+	} {
+		s := mustNew(t, Options{Size: 101})
+		chunks := s.Split(text)
+		checkContract(t, s, text, chunks)
+		for _, c := range chunks[:len(chunks)-1] {
+			previous, _ := utf8.DecodeLastRuneInString(text[:c.End])
+			next, _ := utf8.DecodeRuneInString(text[c.End:])
+			flags := strings.Count(text[:c.End], "🇨")
+			if previous == '\u200D' || next == '\u200D' || unicode.Is(unicode.Mn, next) || next == 0x1F3FD ||
+				name == "flags" && flags != strings.Count(text[:c.End], "🇳") {
+				t.Errorf("%s: chunk ends inside a cluster at %d", name, c.End)
+			}
+		}
+	}
+	// A cluster longer than MaxSize is still cut within it.
+	s := mustNew(t, Options{Size: 50})
+	text := "a" + strings.Repeat("\u0301", 500)
+	checkContract(t, s, text, s.Split(text))
+
+	// A cluster that fits ends the chunk even before short trailing whitespace,
+	// and the cut moves to the nearer cluster end.
+	for name, tc := range map[string]struct {
+		opts    Options
+		text    string
+		lengths []int
+	}{
+		"emoji before spaces":     {Options{Size: 8, MaxSize: 8}, "👨‍👩‍👧‍👦   ", []int{7, 3}},
+		"combining before spaces": {Options{Size: 8, MaxSize: 10}, "e" + strings.Repeat("\u0301", 9) + "     ", []int{10, 5}},
+		"joiner before spaces":    {Options{Size: 8, MaxSize: 14}, strings.Repeat("a\u200D", 6) + "   ", []int{13, 2}},
+		"nearer end after":        {Options{Size: 7, MaxSize: 8}, "x👨‍👩‍👧‍👦zz", []int{8, 2}},
+		"nearer end":              {Options{Size: 16, MaxSize: 30}, "xxxx" + strings.Repeat("\u0301", 20) + strings.Repeat("y", 30), []int{24, 30}},
+		"nearer start":            {Options{Size: 6, MaxSize: 30}, "xxxx" + strings.Repeat("\u0301", 20) + strings.Repeat("y", 30), []int{3, 21, 30}},
+	} {
+		s := mustNew(t, tc.opts)
+		chunks := s.Split(tc.text)
+		checkContract(t, s, tc.text, chunks)
+		var lengths []int
+		for _, c := range chunks {
+			lengths = append(lengths, utf8.RuneCountInString(c.Text))
+		}
+		if !slices.Equal(lengths, tc.lengths) {
+			t.Errorf("%s: chunk lengths %v, want %v", name, lengths, tc.lengths)
 		}
 	}
 }

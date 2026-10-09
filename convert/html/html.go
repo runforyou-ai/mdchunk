@@ -1,14 +1,14 @@
 // Package html converts HTML to CommonMark with GFM tables.
 //
 // The encoding comes from a BOM, then Input.Charset when it names a known
-// encoding, then the first <meta> charset declaration before <body>, then
-// UTF-8 or Options.Fallback. Tables, innermost first, are expanded to
-// rectangular grids before conversion: spans (clamped to the HTML standard's
-// limits and kept within their row group) repeat their cell, short rows are
-// padded, and a heuristic score of the copies must fit
-// Limits.MaxExpandedBytes; a table containing another table is left to the
-// converter, which renders it as text around the inner table. Block quotes
-// and lists nested deeper than 8 levels render at the eighth. A
+// encoding, then the first <meta> charset declaration before <body> (UTF-16
+// read as UTF-8, as browsers do), then UTF-8 or Options.Fallback. Tables,
+// innermost first, are expanded to rectangular grids before conversion: spans
+// (clamped to the HTML standard's limits and kept within their row group)
+// repeat their cell, short rows are padded, and a heuristic score of the
+// copies must fit Limits.MaxExpandedBytes; a table containing another table
+// is left to the converter, which renders it as text around the inner table.
+// Block quotes and lists nested deeper than 8 levels render at the eighth. A
 // table without header cells promotes its first row, and relative links
 // resolve against Input.BaseURL.
 package html
@@ -27,6 +27,7 @@ import (
 	xhtml "golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/htmlindex"
 
 	"github.com/runforyou-ai/mdchunk/convert"
 	"github.com/runforyou-ai/mdchunk/internal/mdwrite"
@@ -72,6 +73,13 @@ func (c *Converter) Convert(ctx context.Context, in convert.Input) (convert.Docu
 	declared := in.Charset
 	if textdecode.Lookup(declared) == nil {
 		declared = metaCharset(data)
+		// A <meta> that could be read as ASCII cannot be UTF-16; as in the
+		// HTML standard's prescan, such a declaration means UTF-8.
+		if e := textdecode.Lookup(declared); e != nil {
+			if name, _ := htmlindex.Name(e); name == "utf-16le" || name == "utf-16be" {
+				declared = "utf-8"
+			}
+		}
 	}
 	text := textdecode.Decode(data, declared, c.opts.Fallback)
 	if strings.TrimSpace(text) == "" {

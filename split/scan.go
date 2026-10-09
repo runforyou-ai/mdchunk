@@ -13,7 +13,8 @@ import (
 type rank int8
 
 const (
-	rankInvalid  rank = iota - 1 // inside a UTF-8 sequence or a CRLF; never cut here
+	rankInvalid  rank = iota - 2 // inside a UTF-8 sequence or a CRLF; never cut here
+	rankJoined                   // inside a grapheme cluster; cut only when no cluster boundary is in reach
 	rankNone                     // allowed only as a last resort
 	rankEnclosed                 // punctuation or space inside code, tables, HTML or code spans
 	rankSpace
@@ -365,17 +366,58 @@ func sameAsPrevLine(lines []line, i int) int {
 }
 
 // frontMatterEnd returns the index of the closing front matter line, or -1.
+// Front matter opens with a "---" first line and closes at the next "---" or
+// "..." line; every line between them must read as YAML (see yamlLine) and at
+// least one must be a mapping key.
 func (l *layout) frontMatterEnd(lines []line) int {
 	first := strings.TrimPrefix(l.text[lines[0].start:lines[0].end], "\uFEFF")
 	if strings.TrimRight(first, " \t") != "---" {
 		return -1
 	}
+	keys := false
 	for i := 1; i < len(lines); i++ {
-		if closing := strings.TrimRight(l.text[lines[i].start:lines[i].end], " \t"); closing == "---" || closing == "..." {
+		text := l.text[lines[i].start:lines[i].end]
+		if closing := strings.TrimRight(text, " \t"); closing == "---" || closing == "..." {
+			if !keys {
+				return -1
+			}
 			return i
 		}
+		key, ok := yamlLine(text)
+		if !ok {
+			return -1
+		}
+		keys = keys || key
 	}
 	return -1
+}
+
+// yamlLine reports whether a line between front matter delimiters reads as
+// YAML: blank, indented, a comment, a sequence item, or a mapping key
+// followed by ":" and a space or the line end. key reports a mapping key,
+// indented or not.
+func yamlLine(text string) (key, ok bool) {
+	trimmed := strings.TrimLeft(text, " \t")
+	switch {
+	case trimmed == "", trimmed[0] == '#', trimmed == "-", strings.HasPrefix(trimmed, "- "):
+		return false, true
+	}
+	key = mappingKey(trimmed)
+	return key, key || trimmed != text
+}
+
+// mappingKey reports whether text starts with a YAML mapping key: text
+// before a ":" that is followed by a space, a tab or the line end.
+func mappingKey(text string) bool {
+	colon := strings.Index(text, ":")
+	for colon >= 0 && colon+1 < len(text) && text[colon+1] != ' ' && text[colon+1] != '\t' {
+		next := strings.Index(text[colon+1:], ":")
+		if next < 0 {
+			return false
+		}
+		colon += 1 + next
+	}
+	return colon > 0
 }
 
 // rankLines ranks line starts and positions within lines.
@@ -442,10 +484,25 @@ func (l *layout) rankWithin(ln line, heading bool) {
 	if !enclosed && !heading {
 		spans = codeSpans(text[ln.start:ln.end])
 	}
-	span := 0
+	span, indicators := 0, 0 // indicators counts the regional indicators right before position
 	for position := ln.start + 1; position <= ln.end; position++ {
 		if l.ranks[position] == rankInvalid {
 			continue
+		}
+		// Only positions next to a multibyte rune can be inside a cluster.
+		if text[position-1] < utf8.RuneSelf && (position == ln.end || text[position] < utf8.RuneSelf) {
+			indicators = 0
+		} else {
+			previous, _ := utf8.DecodeLastRuneInString(text[ln.start:position])
+			if isRegionalIndicator(previous) {
+				indicators++
+			} else {
+				indicators = 0
+			}
+			if position < ln.end && joined(previous, text[position:], indicators) {
+				l.ranks[position] = rankJoined
+				continue
+			}
 		}
 		value := rankNone
 		if !heading {
@@ -462,6 +519,38 @@ func (l *layout) rankWithin(ln line, heading bool) {
 		}
 		l.ranks[position] = value
 	}
+}
+
+// zeroWidthJoiner joins emoji into one grapheme cluster.
+const zeroWidthJoiner = '\u200D'
+
+// joined reports whether a cut between previous and the rune rest starts with
+// would split a grapheme cluster: before a combining mark, joiner, variation
+// selector, emoji modifier or tag character, after a joiner, or between the
+// two regional indicators of a flag. indicators counts the regional
+// indicators that end with previous. It approximates extended grapheme
+// cluster boundaries without the Unicode property tables.
+func joined(previous rune, rest string, indicators int) bool {
+	// ASCII and the three-byte runes from U+4000 to U+9FFF, which hold most
+	// CJK text, never join the rune before them.
+	if lead := rest[0]; previous != zeroWidthJoiner && (lead < utf8.RuneSelf || lead >= 0xE4 && lead <= 0xE9) {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(rest)
+	switch {
+	case previous == zeroWidthJoiner, next == zeroWidthJoiner:
+		return true
+	case unicode.In(next, unicode.Mn, unicode.Me, unicode.Mc, unicode.Variation_Selector):
+		return true
+	case next >= 0x1F3FB && next <= 0x1F3FF, next >= 0xE0020 && next <= 0xE007F:
+		return true
+	}
+	return isRegionalIndicator(next) && indicators%2 == 1
+}
+
+// isRegionalIndicator reports whether r is one of the letters flags are written with.
+func isRegionalIndicator(r rune) bool {
+	return r >= 0x1F1E6 && r <= 0x1F1FF
 }
 
 // punctuationRank ranks a cut after the last rune of prefix.

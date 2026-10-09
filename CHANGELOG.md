@@ -19,6 +19,19 @@
   charged against `MaxOutputBytes` as it is read.
 - HTML: block quotes and lists nested deeper than 8 levels render at the
   eighth level.
+- HTML: a `<meta>` declaring UTF-16 means UTF-8, as in browsers, so
+  `Options.Fallback` does not apply to it.
+- Package `split`: a leading `---` block is front matter only when every
+  line up to the closing delimiter reads as YAML (blank, indented, a `#`
+  comment, a sequence item or a key) and one is a key; otherwise it is a
+  thematic break, and a later `---` right under a paragraph line is a setext
+  underline. A `#` line counts as a comment, so a heading inside such a
+  block is still front matter when another line reads as a key.
+- Package `split`: last-resort cuts keep grapheme clusters (emoji sequences,
+  flags, combining marks) whole when a cluster end is within `MaxSize`,
+  moving to the nearer end, even when short trailing whitespace is then
+  left as a chunk of its own.
+- `Chunk.Context` is documented as unbounded by `Size` and `MaxSize`.
 
 ## v0.1.0
 

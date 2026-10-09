@@ -111,7 +111,10 @@ func (c Chunk) TextWithContext() string
 `Context` is byte-exact and part of the compatibility promise: the heading
 texts joined by `" > "` (not escaped), then `TableHeader.Text` unchanged; the
 two parts are joined by a single `"\n"` and an empty part adds no separator.
-Both empty yields `""`. Neither method adds a trailing newline. `Heading` and
+Both empty yields `""`. Neither method adds a trailing newline. `Context` is
+not bounded by `Size` or `MaxSize`: a long heading or a wide table header
+appears in full in every chunk under it. Callers with an embedding budget
+truncate it or build their own from `Headings` and `TableHeader`. `Heading` and
 `TableHeader` ranges start at the first line's start (including indentation)
 and end at the last line's end (excluding its terminator).
 
@@ -156,7 +159,8 @@ Within the contract, in priority order:
    otherwise split it into near-equal pieces around `Size`.
 3. Choose the highest-ranked boundary nearest each piece's target position:
    block > line break > sentence end > clause > whitespace > enclosed position >
-   any code point. Beyond `Size` only block boundaries count at first; when
+   any code point, where a cut that would split a grapheme cluster moves to
+   the nearer cluster end within `MaxSize` (the later on a tie). Beyond `Size` only block boundaries count at first; when
    that leaves only enclosed or no boundaries, a line break, sentence end,
    clause or whitespace up to `MaxSize` keeps a line or heading whole; failing
    that, a heading that fits ends the chunk without its body's first line. Pieces
@@ -167,6 +171,14 @@ Within the contract, in priority order:
 5. Every chunk holds some non-whitespace text, unless it lies in a whitespace
    run of at least `Size` code points or cannot join either neighbouring chunk
    within `MaxSize`.
+
+Grapheme clusters are approximated without Unicode property tables: no cut
+falls before a combining mark, zero-width joiner, variation selector, emoji
+modifier or tag character, after a zero-width joiner, or between the two
+regional indicators of a flag, unless a cluster is longer than `MaxSize`
+allows. A cluster ending the content may end the chunk before trailing
+whitespace that then cannot join it within `MaxSize`. Other joiners (such as
+U+200C and Hangul jamo) are not covered, so this is not full UAX #29.
 
 Sentence ends are `。！？`, and `.!?` followed by whitespace; clauses are `，；`,
 and `,;` followed by whitespace. Adjacent plain-text lines where the first ends
@@ -185,8 +197,15 @@ at most three spaces of indentation. Each line is classified in this order:
 
 1. Inside an open fence: code until a closing fence of the same character and
    at least the same length. An unclosed fence runs to the end of input.
-2. Front matter: only when the first line (after an optional BOM) is `---` and a
-   closing `---` or `...` line exists; otherwise the line is not front matter.
+2. Front matter: only when the first line (after an optional BOM) is `---`, a
+   closing `---` or `...` line exists, every line between them reads as YAML
+   (blank, indented, a `#` comment, a `- ` sequence item, or a key followed by
+   `:` and a space or the line end) and at least one, indented or not, is a
+   key; otherwise the first line is a thematic break. A block of sequence
+   items alone is therefore not front matter, and an ATX heading reads as a
+   comment, so `---`, a heading, a line such as `Author: x` and `---` is front
+   matter. When the first line is a thematic break, a later `---` right under
+   a paragraph line is a setext underline, as in CommonMark.
 3. Inside an HTML block: until its end condition. Recognised starts are
    `<script`, `<pre`, `<style`, `<textarea` (end at the closing tag), `<!--`
    (end at `-->`) and CommonMark block-level tag names (end at a blank line).
@@ -373,7 +392,9 @@ holding that package's `Options`, plus shared `Limits` and `Fallback`.
 Shared by text, HTML and CSV: a BOM (UTF-8, UTF-16 or UTF-32) wins, then
 `Input.Charset`, then (HTML only) the first `<meta>` declaration before
 `<body>`, then UTF-8. A declared charset is used only when it names a known
-encoding other than the replacement encoding. Undeclared input that is not
+encoding other than the replacement encoding; a `<meta>` declaring UTF-16
+means UTF-8, as in the HTML standard's prescan, since a document whose
+`<meta>` reads as ASCII is not UTF-16. Undeclared input that is not
 valid UTF-8 is decoded with `Options.Fallback` when set (for example
 GB18030). Bytes that cannot be decoded become U+FFFD.
 
@@ -471,9 +492,10 @@ GB18030). Bytes that cannot be decoded become U+FFFD.
 ## Testing
 
 - Unit tests with `-race`; examples as `example_test.go` per package.
-- Golden files in `testdata/` per converter and for the splitter (Markdown in,
-  JSON chunks out), refreshed with a package-level `-update` flag. PDF goldens
-  assert structure (pages, headings, text presence) rather than exact bytes.
+- Golden files in `split/testdata/` for the splitter (Markdown in, JSON chunks
+  out), refreshed with `-update`. Converter tests build their inputs in code
+  and compare the exact Markdown inline; PDF tests also check pages,
+  headings and text presence.
 - Property tests and a fuzz target for `Splitter.Split` covering the contract,
   with seeds for CRLF, lone CR, BOM, invalid UTF-8, emoji, very long lines,
   tiny budgets, long heading runs, unclosed fences and front matter.
