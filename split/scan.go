@@ -399,15 +399,11 @@ func (l *layout) frontMatterEnd(lines []line) int {
 func yamlLine(text string) (key, ok bool) {
 	trimmed := strings.TrimLeft(text, " \t")
 	switch {
-	case strings.TrimSpace(text) == "", text[0] == '#':
-		return false, true
-	case trimmed != text:
-		return mappingKey(trimmed), true
-	case text == "-", strings.HasPrefix(text, "- "):
+	case trimmed == "", trimmed[0] == '#', trimmed == "-", strings.HasPrefix(trimmed, "- "):
 		return false, true
 	}
-	key = mappingKey(text)
-	return key, key
+	key = mappingKey(trimmed)
+	return key, key || trimmed != text
 }
 
 // mappingKey reports whether text starts with a YAML mapping key: text

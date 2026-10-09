@@ -354,6 +354,9 @@ func TestFrontMatterNeedsYAML(t *testing.T) {
 		"colon inside word": {"---\nhttp://e.com\n---\n# H\n", false},
 		"indented keys":     {"---\n  title: x\n# Metadata comment\n---\n\nbody\n", true},
 		"sequence only":     {"---\n- title: x\n---\n# H\n", false},
+		"indented sequence": {"---\n\n# 第一章\n\n  - 作者: 张三\n\n---\n", false},
+		"indented comment":  {"---\n\n# 第一章\n\n  # 作者: 张三\n\n---\n", false},
+		"nested key":        {"---\nauthor:\n    name: x\n---\n", true},
 		// A "#" line reads as a YAML comment, so a heading followed by a key-like line is front matter.
 		"heading and key": {"---\n# 第一章\n作者: 张三\n---\n# 第二章\n", true},
 	} {
@@ -422,7 +425,8 @@ func TestGraphemeClustersStayWhole(t *testing.T) {
 		"combining before spaces": {Options{Size: 8, MaxSize: 10}, "e" + strings.Repeat("\u0301", 9) + "     ", []int{10, 5}},
 		"joiner before spaces":    {Options{Size: 8, MaxSize: 14}, strings.Repeat("a\u200D", 6) + "   ", []int{13, 2}},
 		"nearer end after":        {Options{Size: 7, MaxSize: 8}, "x👨‍👩‍👧‍👦zz", []int{8, 2}},
-		"nearer end before":       {Options{Size: 16, MaxSize: 30}, "xxxx" + strings.Repeat("\u0301", 20) + strings.Repeat("y", 30), []int{24, 30}},
+		"nearer end":              {Options{Size: 16, MaxSize: 30}, "xxxx" + strings.Repeat("\u0301", 20) + strings.Repeat("y", 30), []int{24, 30}},
+		"nearer start":            {Options{Size: 6, MaxSize: 30}, "xxxx" + strings.Repeat("\u0301", 20) + strings.Repeat("y", 30), []int{3, 21, 30}},
 	} {
 		s := mustNew(t, tc.opts)
 		chunks := s.Split(tc.text)
