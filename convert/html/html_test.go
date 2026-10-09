@@ -211,12 +211,16 @@ func TestCharset(t *testing.T) {
 			t.Errorf("%s: got %q", name, got)
 		}
 	}
-	for _, source := range []string{gbk(t), `<meta charset="utf-16">` + gbk(t)} {
-		doc, err := html.New(html.Options{Fallback: simplifiedchinese.GB18030}).Convert(context.Background(),
-			convert.Input{Reader: strings.NewReader(source)})
-		if err != nil || doc.Markdown != "中文" {
-			t.Errorf("fallback: %q, %v", doc.Markdown, err)
-		}
+	doc, err := html.New(html.Options{Fallback: simplifiedchinese.GB18030}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(gbk(t))})
+	if err != nil || doc.Markdown != "中文" {
+		t.Errorf("fallback: %q, %v", doc.Markdown, err)
+	}
+	// A UTF-16 <meta> declares UTF-8, so Fallback does not apply.
+	doc, err = html.New(html.Options{Fallback: simplifiedchinese.GB18030}).Convert(context.Background(),
+		convert.Input{Reader: strings.NewReader(`<meta charset="utf-16">` + gbk(t))})
+	if err != nil || !strings.Contains(doc.Markdown, "\uFFFD") {
+		t.Errorf("meta utf-16 with fallback: %q, %v", doc.Markdown, err)
 	}
 }
 

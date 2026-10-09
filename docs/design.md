@@ -160,7 +160,7 @@ Within the contract, in priority order:
 3. Choose the highest-ranked boundary nearest each piece's target position:
    block > line break > sentence end > clause > whitespace > enclosed position >
    any code point, where a cut that would split a grapheme cluster moves to
-   the nearest cluster boundary within reach. Beyond `Size` only block boundaries count at first; when
+   the nearer cluster end within `MaxSize` (the later on a tie). Beyond `Size` only block boundaries count at first; when
    that leaves only enclosed or no boundaries, a line break, sentence end,
    clause or whitespace up to `MaxSize` keeps a line or heading whole; failing
    that, a heading that fits ends the chunk without its body's first line. Pieces
@@ -176,7 +176,9 @@ Grapheme clusters are approximated without Unicode property tables: no cut
 falls before a combining mark, zero-width joiner, variation selector, emoji
 modifier or tag character, after a zero-width joiner, or between the two
 regional indicators of a flag, unless a cluster is longer than `MaxSize`
-allows.
+allows. A cluster ending the content may end the chunk before trailing
+whitespace that then cannot join it within `MaxSize`. Other joiners (such as
+U+200C and Hangul jamo) are not covered, so this is not full UAX #29.
 
 Sentence ends are `。！？`, and `.!?` followed by whitespace; clauses are `，；`,
 and `,;` followed by whitespace. Adjacent plain-text lines where the first ends
@@ -198,8 +200,12 @@ at most three spaces of indentation. Each line is classified in this order:
 2. Front matter: only when the first line (after an optional BOM) is `---`, a
    closing `---` or `...` line exists, every line between them reads as YAML
    (blank, indented, a `#` comment, a `- ` sequence item, or a key followed by
-   `:` and a space or the line end) and at least one is a key; otherwise the
-   first line is a thematic break.
+   `:` and a space or the line end) and at least one, indented or not, is a
+   key; otherwise the first line is a thematic break. A block of sequence
+   items alone is therefore not front matter, and an ATX heading reads as a
+   comment, so `---`, a heading, a line such as `Author: x` and `---` is front
+   matter. When the first line is a thematic break, a later `---` right under
+   a paragraph line is a setext underline, as in CommonMark.
 3. Inside an HTML block: until its end condition. Recognised starts are
    `<script`, `<pre`, `<style`, `<textarea` (end at the closing tag), `<!--`
    (end at `-->`) and CommonMark block-level tag names (end at a blank line).
@@ -387,8 +393,8 @@ Shared by text, HTML and CSV: a BOM (UTF-8, UTF-16 or UTF-32) wins, then
 `Input.Charset`, then (HTML only) the first `<meta>` declaration before
 `<body>`, then UTF-8. A declared charset is used only when it names a known
 encoding other than the replacement encoding; a `<meta>` declaring UTF-16
-is ignored, as browsers ignore it, since a document whose `<meta>` reads as
-ASCII is not UTF-16. Undeclared input that is not
+means UTF-8, as in the HTML standard's prescan, since a document whose
+`<meta>` reads as ASCII is not UTF-16. Undeclared input that is not
 valid UTF-8 is decoded with `Options.Fallback` when set (for example
 GB18030). Bytes that cannot be decoded become U+FFFD.
 

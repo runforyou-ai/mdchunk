@@ -352,6 +352,10 @@ func TestFrontMatterNeedsYAML(t *testing.T) {
 		"comments only":     {"---\n# H\n---\n", false},
 		"prose with colon":  {"---\nNote: see below.\nMore prose here\n---\n# H\n", false},
 		"colon inside word": {"---\nhttp://e.com\n---\n# H\n", false},
+		"indented keys":     {"---\n  title: x\n# Metadata comment\n---\n\nbody\n", true},
+		"sequence only":     {"---\n- title: x\n---\n# H\n", false},
+		// A "#" line reads as a YAML comment, so a heading followed by a key-like line is front matter.
+		"heading and key": {"---\n# 第一章\n作者: 张三\n---\n# 第二章\n", true},
 	} {
 		end := scan(tc.text).frontMatterEnd(splitLines(tc.text))
 		if (end >= 0) != tc.frontMatter {
@@ -371,6 +375,14 @@ func TestFrontMatterNeedsYAML(t *testing.T) {
 	}
 	if want := []string{"第一章", "第二章"}; !slices.Equal(paths, want) {
 		t.Errorf("heading paths = %q, want %q", paths, want)
+	}
+	// Without front matter, a "---" right under a paragraph underlines it as a setext heading.
+	text = "---\n\n# 第一章\n\n内容一。\n---\n\n后续正文\n"
+	chunks = s.Split(text)
+	checkContract(t, s, text, chunks)
+	last := chunks[len(chunks)-1]
+	if got, want := strings.Join(headingTexts(last), " > "), "第一章 > 内容一。"; got != want {
+		t.Errorf("setext: last chunk %q under %q, want %q", last.Text, got, want)
 	}
 }
 
@@ -398,6 +410,31 @@ func TestGraphemeClustersStayWhole(t *testing.T) {
 	s := mustNew(t, Options{Size: 50})
 	text := "a" + strings.Repeat("\u0301", 500)
 	checkContract(t, s, text, s.Split(text))
+
+	// A cluster that fits ends the chunk even before short trailing whitespace,
+	// and the cut moves to the nearer cluster end.
+	for name, tc := range map[string]struct {
+		opts    Options
+		text    string
+		lengths []int
+	}{
+		"emoji before spaces":     {Options{Size: 8, MaxSize: 8}, "👨‍👩‍👧‍👦   ", []int{7, 3}},
+		"combining before spaces": {Options{Size: 8, MaxSize: 10}, "e" + strings.Repeat("\u0301", 9) + "     ", []int{10, 5}},
+		"joiner before spaces":    {Options{Size: 8, MaxSize: 14}, strings.Repeat("a\u200D", 6) + "   ", []int{13, 2}},
+		"nearer end after":        {Options{Size: 7, MaxSize: 8}, "x👨‍👩‍👧‍👦zz", []int{8, 2}},
+		"nearer end before":       {Options{Size: 16, MaxSize: 30}, "xxxx" + strings.Repeat("\u0301", 20) + strings.Repeat("y", 30), []int{24, 30}},
+	} {
+		s := mustNew(t, tc.opts)
+		chunks := s.Split(tc.text)
+		checkContract(t, s, tc.text, chunks)
+		var lengths []int
+		for _, c := range chunks {
+			lengths = append(lengths, utf8.RuneCountInString(c.Text))
+		}
+		if !slices.Equal(lengths, tc.lengths) {
+			t.Errorf("%s: chunk lengths %v, want %v", name, lengths, tc.lengths)
+		}
+	}
 }
 
 func TestHeadingsAreRecognised(t *testing.T) {

@@ -394,23 +394,34 @@ func (l *layout) frontMatterEnd(lines []line) int {
 
 // yamlLine reports whether a line between front matter delimiters reads as
 // YAML: blank, indented, a comment, a sequence item, or a mapping key
-// followed by ":" and a space or the line end. key reports the last.
+// followed by ":" and a space or the line end. key reports a mapping key,
+// indented or not.
 func yamlLine(text string) (key, ok bool) {
+	trimmed := strings.TrimLeft(text, " \t")
 	switch {
-	case strings.TrimSpace(text) == "", text[0] == ' ', text[0] == '\t', text[0] == '#':
+	case strings.TrimSpace(text) == "", text[0] == '#':
 		return false, true
+	case trimmed != text:
+		return mappingKey(trimmed), true
 	case text == "-", strings.HasPrefix(text, "- "):
 		return false, true
 	}
+	key = mappingKey(text)
+	return key, key
+}
+
+// mappingKey reports whether text starts with a YAML mapping key: text
+// before a ":" that is followed by a space, a tab or the line end.
+func mappingKey(text string) bool {
 	colon := strings.Index(text, ":")
 	for colon >= 0 && colon+1 < len(text) && text[colon+1] != ' ' && text[colon+1] != '\t' {
 		next := strings.Index(text[colon+1:], ":")
 		if next < 0 {
-			return false, false
+			return false
 		}
 		colon += 1 + next
 	}
-	return colon > 0, colon > 0
+	return colon > 0
 }
 
 // rankLines ranks line starts and positions within lines.
